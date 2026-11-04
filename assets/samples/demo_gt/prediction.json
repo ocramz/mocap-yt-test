@@ -1,0 +1,15 @@
+{
+ "rig": "Humanoid",
+ "frames": 300,
+ "fps": 15.0,
+ "inference_seconds": 16.3,
+ "fk_vs_pred_position_err_normalised": 0.0848,
+ "fk_vs_pred_position_err_m": 0.0818,
+ "bvh": "demo_gt_humanoid.bvh",
+ "sample": "demo_gt",
+ "source": "hf://datasets/kehong/MoCapAnythingV2-data-sample/inputs/nbg_human/gt.mp4",
+ "start": 0.0,
+ "duration": null,
+ "glb": "demo_gt_humanoid.glb",
+ "preview": "demo_gt_preview.mp4"
+}
