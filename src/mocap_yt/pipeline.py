@@ -159,7 +159,7 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
     feats, ok = sample_features(d, frames, extractor)
     pred = run_inference(feats, ok, cfg.rig_root, cfg.rig.name, model=model)
     out = d / "out"
-    res = save_prediction(pred, out, cfg.rig_root, fps=s.fps)
+    res = save_prediction(pred, out, cfg.rig_root, fps=s.fps, stem=f"{s.id}_{cfg.rig.name.lower()}")
     motion = res.pop("motion")
 
     skel = motion.skeleton
@@ -179,7 +179,9 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
 def publish_sample(cfg: PipelineConfig, s: Sample, include_video: bool = True) -> Path:
     src = cfg.work / "samples" / s.id / "out"
     dst = ASSETS / "samples" / s.id
-    dst.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
     pats = ["*.glb", "*.bvh", "*.png", "prediction.json"] + (["*.mp4"] if include_video else [])
     for pat in pats:
         for f in src.glob(pat):

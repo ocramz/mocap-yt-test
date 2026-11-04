@@ -1,0 +1,15 @@
+{
+ "rig": "Humanoid",
+ "frames": 300,
+ "fps": 15.0,
+ "inference_seconds": 16.57,
+ "fk_vs_pred_position_err_normalised": 0.1028,
+ "fk_vs_pred_position_err_m": 0.0991,
+ "bvh": "demo_trap_humanoid.bvh",
+ "sample": "demo_trap",
+ "source": "hf://datasets/kehong/MoCapAnythingV2-data-sample/inputs/nbg_human/trap.mp4",
+ "start": 0.0,
+ "duration": null,
+ "glb": "demo_trap_humanoid.glb",
+ "preview": "demo_trap_preview.mp4"
+}

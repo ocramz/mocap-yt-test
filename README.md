@@ -52,6 +52,7 @@ already exists. `--publish` copies the lightweight results into `assets/samples/
 | `src/mocap_yt/inference.py` | loads the released checkpoint, runs `video2pose2rot`, sliding windows for clips longer than 300 frames, BVH export |
 | `src/mocap_yt/video.py` | yt-dlp download, ffmpeg trim/resample, frame extraction |
 | `src/mocap_yt/pipeline.py`, `cli.py` | config-driven orchestration (`mocap-yt …`) |
+| `scripts/gltf_screenshots.sh` | renders every published GLB in three.js (headless Chromium via Playwright) |
 | `third_party/MocapAnything` | upstream, git submodule pinned at `c99fb22` |
 | `assets/rigs/humanoid/` | the generated rig: BVH, glTF/GLB, previews, reference render |
 | `assets/samples/<id>/` | per-video results: `.glb`, `.bvh`, preview `.mp4`, screenshots, `prediction.json` |
@@ -92,13 +93,37 @@ into `work/rigs/<Rig>/`:
 | `npz_train_image_only/…/y0.npz` | DINOv2 tokens of the rendered reference frame |
 | `characters/<Rig>/<Rig>_ffs.bvh` | rest-pose template used to write predicted rotations to BVH |
 
+## Results so far
+
+| sample | source | frames | status |
+|---|---|---|---|
+| `yt_nIfU38nAYYk` | https://youtu.be/nIfU38nAYYk | – | **not downloaded**: YouTube refused this cloud VM (bot check, then HTTP 403 on the media). Needs `cookies:` or a local file, see above |
+| `demo_trap` | MocapAnything demo clip `inputs/nbg_human/trap.mp4` | 300 @ 15 fps | ✅ `assets/samples/demo_trap/` |
+| `demo_gt` | MocapAnything demo clip `inputs/nbg_human/gt.mp4` | 300 @ 15 fps | ✅ `assets/samples/demo_gt/` |
+
+Each `assets/samples/<id>/` holds:
+
+* `<id>_humanoid.glb`: the skinned mannequin + bones with the captured animation;
+* `<id>_humanoid.bvh`;
+* `<id>_preview.mp4` and `<id>_preview_strip.png`: input | capture front | capture side;
+* `<id>_humanoid_threejs.png`: the GLB played back in three.js, an independent viewer check
+  produced by `scripts/gltf_screenshots.sh`;
+* `prediction.json`: timings and a consistency metric.
+
+`fk_vs_pred_position_err_m` in `prediction.json` is the mean distance between the
+model's predicted joint positions and forward kinematics of its predicted rotations,
+around 8–10 cm on the demo clips. The model's two heads agree only approximately.
+
 ## Notes and limitations
 
 * **No global trajectory.** The model predicts root-relative pose. The exporter keeps the
   lowest joint on the floor (`ground_motion`), and the root doesn't translate horizontally.
 * Upstream caps one forward pass at 301 frames. Longer clips run in 300-frame windows with
   32-frame linear cross-fades.
-* CPU timings (4 vCPU) for a 300-frame clip: about 3–4 min matting + DINOv2, plus the model
-  forward pass; see `prediction.json` for each sample.
+* Upstream pads every skeleton to 150 joints. No weight depends on that size, so padding only
+  to the rig's 25 joints gives the same output (`tests/test_inference.py`, to 1e-4) and cuts the
+  forward pass for 300 frames from about 107 s to about 16 s on 4 vCPUs.
+* CPU cost is dominated by preprocessing: RMBG-1.4 matting at 1024² plus DINOv2-large takes
+  about 10 min per 300 frames on 4 vCPUs. The result is cached in `work/samples/<id>/features.npz`.
 * Model licence: MocapAnything code and weights are MIT. RMBG-1.4 (BRIA AI) has its own,
   non-commercial terms.

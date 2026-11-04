@@ -144,7 +144,9 @@ def ground_motion(m: Motion, smooth: int = 5) -> Motion:
     return Motion(m.skeleton, m.local_rot, root, m.fps)
 
 
-def save_prediction(pred: Prediction, out_dir: Path, rig_root: Path, fps: float, ground: bool = True) -> dict:
+def save_prediction(
+    pred: Prediction, out_dir: Path, rig_root: Path, fps: float, ground: bool = True, stem: str | None = None
+) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / f"{pred.rig}_pose_pred.npy", pred.position.astype(np.float32))
     np.save(out_dir / f"{pred.rig}_rot6d_pred.npy", pred.rot6d.astype(np.float32))
@@ -152,7 +154,7 @@ def save_prediction(pred: Prediction, out_dir: Path, rig_root: Path, fps: float,
     motion = rot6d_to_motion(pred.rot6d, tpl, fps)
     if ground:
         motion = ground_motion(motion)
-    bvh_path = write_bvh(out_dir / f"{pred.rig}.bvh", motion)
+    bvh_path = write_bvh(out_dir / f"{stem or pred.rig}.bvh", motion)
 
     # consistency: FK(predicted rotations) vs. predicted joint positions (both normalised)
     from .skeleton import forward_kinematics
