@@ -1,0 +1,28 @@
+# Pipeline definition: `uv run mocap-yt run [ids...] --publish`
+#
+# rig: the generated Mixamo-convention humanoid MocapAnything is conditioned on.
+# samples: input videos. `source` can be a YouTube/yt-dlp URL, a local path, or
+#   hf://<datasets|models>/<org>/<repo>/<path-in-repo>.
+#   start/duration select the segment (seconds); clips are resampled to `fps`
+#   (15, like upstream's human demo clips) and scaled to `height` pixels.
+#   `cookies`: optional Netscape cookies.txt for yt-dlp (YouTube may demand it).
+
+rig:
+  name: Humanoid
+  height: 1.75
+  fingers: false
+  ref_pose: apose      # apose | tpose — pose of the reference frame the model sees
+
+samples:
+  - id: yt_nIfU38nAYYk
+    source: https://youtu.be/nIfU38nAYYk
+    start: 0
+    duration: 20
+    # cookies: work/cookies.txt
+
+  # Stand-in human clips from MocapAnything's demo data (used to validate the
+  # pipeline end-to-end when YouTube is not reachable).
+  - id: demo_trap
+    source: hf://datasets/kehong/MoCapAnythingV2-data-sample/inputs/nbg_human/trap.mp4
+  - id: demo_gt
+    source: hf://datasets/kehong/MoCapAnythingV2-data-sample/inputs/nbg_human/gt.mp4

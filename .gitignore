@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# mocap_yt working data (downloads, frames, caches, checkpoints)
+/work/
