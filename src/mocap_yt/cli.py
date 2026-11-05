@@ -42,6 +42,10 @@ def cmd_setup(args):
     for w in (FasterRCNN_MobileNet_V3_Large_FPN_Weights.COCO_V1, DeepLabV3_MobileNet_V3_Large_Weights.COCO_WITH_VOC_LABELS_V1):
         w.get_state_dict(progress=True)
         print("torchvision ->", w.url)
+    # SAM 2.1 + ViTPose for `subject: person_sam` samples (the checkpoints configured under `person_sam:`)
+    ps = _cfg(args).person_sam
+    for repo in (ps.sam, ps.pose):
+        print(repo, "->", snapshot_download(repo, allow_patterns=["*.json", "*.safetensors", "*.txt"]))
 
 
 def cmd_rig(args):
@@ -135,13 +139,85 @@ def cmd_gallery(args):
     print(gallery(rows, build_mannequin(cfg.rig.skeleton()), Path(args.out), n=args.n))
 
 
+def _frames_arg(text: str) -> tuple[str, list[int] | None]:
+    """``ID`` or ``ID:F1,F2,...`` -> (id, frame indices or None)."""
+    sid, _, frames = text.partition(":")
+    try:
+        return sid, [int(f) for f in frames.split(",")] if frames else None
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected ID or ID:F1,F2,..., got {text!r}") from None
+
+
+def cmd_matte(args):
+    """Matte a few frames of samples with several modes, side by side (no DINOv2, no capture)."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    from .features import FeatureExtractor
+    from .person_sam import PersonPoses, prompt_region
+    from .pipeline import prepare_sample
+    from .preview import annotate_person, matte_sheet
+
+    cfg = _cfg(args)
+    ps = cfg.person_sam
+    picks = dict(args.ids)
+    ext = FeatureExtractor(person_sam=ps)
+    sections, diag = [], {}
+    for s in _select(cfg, list(picks)):
+        d, frames = prepare_sample(cfg, s)
+        n = len(frames)
+        idx = picks[s.id] or (list(range(0, n, args.every)) if args.every else
+                              sorted({round(k * (n - 1) / max(1, args.n - 1)) for k in range(args.n)}))
+        if bad := [t for t in idx if not 0 <= t < n]:
+            raise SystemExit(f"{s.id}: frames {bad} out of range (0-{n - 1})")
+        poses = PersonPoses.load(d / "poses.npz", ps.pose_tag(), n)  # left by a person_sam run
+        if poses is None:
+            boxes = ext.track_people(frames)  # tracking needs the whole clip, pose only the picked frames
+            if boxes is None:
+                raise SystemExit(f"{s.id}: no person detected")
+            poses = ext.estimate_poses([frames[t] for t in idx], boxes[idx], progress=False)
+        else:
+            poses = PersonPoses(poses.boxes[idx], poses.keypoints[idx], poses.rotation[idx], poses.rot_scores[idx])
+        rows, info = [], []
+        for j, t in enumerate(idx):
+            rgb = cv2.cvtColor(cv2.imread(str(frames[t]), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+            box, kps = poses.boxes[j], poses.keypoints[j]
+            rec = {"frame": t, "rotation": int(poses.rotation[j]), "keypoint_score": round(float(kps[:, 2].mean()), 3)}
+            crops, matte = {}, None
+            for mode in args.modes:
+                try:
+                    crop, _ = ext.matte_and_crop(rgb, box=None if mode == "salient" else box,
+                                                 pose=kps if mode == "person_sam" else None)
+                except ValueError as e:
+                    crops[mode] = (None, "skipped")
+                    rec[mode] = f"skipped: {e}"
+                    continue
+                caption = mode
+                if mode == "person_sam":
+                    matte, fail = ext.last_matte, ext.last_failure
+                    caption = matte.source if matte else "rmbg fallback"
+                    rec[mode] = {"source": caption, **({"stats": matte.stats, "attempts": matte.attempts} if matte
+                                                       else {"attempts": fail.attempts if fail else []})}
+                crops[mode] = (Image.fromarray((crop * 255).astype(np.uint8)), caption)
+            region = matte.region if matte else prompt_region(box, rgb.shape[:2], ps.context, ps.min_region)
+            rows.append((t, annotate_person(rgb, box, kps, region, ps.kp_score, matte), crops))
+            info.append(rec)
+        sections.append((s.id, rows))
+        diag[s.id] = info
+    out = Path(args.out) if args.out else cfg.work / "matte" / f"{'+'.join(picks)}.png"
+    print(matte_sheet(sections, args.modes, out))
+    out.with_suffix(".json").write_text(json.dumps(diag, indent=1))
+    print(out.with_suffix(".json"))
+
+
 def cmd_run(args):
     from .features import FeatureExtractor
     from .inference import MocapModel
     from .pipeline import build_rig, publish_sample, run_sample
 
     cfg = _cfg(args)
-    ext = FeatureExtractor()
+    ext = FeatureExtractor(person_sam=cfg.person_sam)
     build_rig(cfg, extractor=ext)
     model = MocapModel()
     for s in _select(cfg, args.ids):
@@ -198,6 +274,15 @@ def main(argv=None):
     g.add_argument("-o", "--out", default=str(WORK_DIR / "gallery.png"))
     g.add_argument("-n", type=int, default=5, help="frames per sample (default: 5)")
     g.set_defaults(fn=cmd_gallery)
+    m = sub.add_parser("matte", help="compare matting modes on a few frames (no DINOv2, no capture)",
+                       description="e.g. mocap-yt matte windmill:0,71,119 hockey_stop -n 7 --modes person person_sam")
+    m.add_argument("ids", nargs="+", type=_frames_arg, metavar="ID[:F1,F2,...]",
+                   help="sample id, optionally with the frame indices to show")
+    m.add_argument("--modes", nargs="+", default=["person", "person_sam"], choices=["salient", "person", "person_sam"])
+    m.add_argument("-n", type=int, default=7, help="evenly spaced frames per sample, when none are given (default: 7)")
+    m.add_argument("--every", type=int, help="instead: every N-th frame")
+    m.add_argument("-o", "--out", help="PNG to write, plus a .json of per-frame details (default: work/matte/<ids>.png)")
+    m.set_defaults(fn=cmd_matte)
     x = sub.add_parser("run", help="end-to-end: rig, features, inference, export, previews")
     x.add_argument("ids", nargs="*")
     x.add_argument("--publish", action="store_true", help="copy results into assets/samples/<id>")

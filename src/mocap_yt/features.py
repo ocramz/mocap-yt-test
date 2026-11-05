@@ -25,16 +25,22 @@ matted, so the model still sees a person on white:
      it does for some upside-down poses; thin leftovers are opened away, the mask is clipped
      to the box plus a margin and reduced to the components that belong to the person
      (:func:`select_components`); then steps 2-3.
+  d. ``subject: person_sam`` (``estimate_poses`` -> ``encode_images(boxes=..., poses=...)``)
+     replaces c: the tracked person's 2D pose (ViTPose) prompts SAM 2.1, see
+     :mod:`mocap_yt.person_sam`. Frames SAM can't segment plausibly fall back to c.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from . import person_sam as psam
 from . import upstream
 
 PERSON = 1  # COCO category id in torchvision's detection models
@@ -117,6 +123,7 @@ class FeatureExtractor:
     person_context: float = 2.0  # side of the region RMBG sees around a person box, in box sizes
     person_margin: float = 0.15  # the person's mask may extend this far (x box size) out of the box
     person_min_cover: float = 0.3  # gate RMBG by the person segmenter only if it covers this much of it
+    person_sam: psam.PersonSamConfig = field(default_factory=psam.PersonSamConfig)  # subject: person_sam
 
     def __post_init__(self):
         upstream.ensure_on_path()
@@ -129,6 +136,11 @@ class FeatureExtractor:
         self.dino_model = Dinov2Model.from_pretrained(upstream.DINO_REPO).to(self.device, self.dtype).eval()
         self._detector = self._segmenter = None
         self.ungated = 0  # person-mode frames where the segmenter gate was skipped
+        self._pose = self._sam = None
+        self.last_matte: psam.MatteResult | None = None  # person_sam result of the last matte_and_crop
+        self.last_failure: psam.NoPersonMask | None = None  # ... or why SAM was not used
+        self.mask_sources: np.ndarray | None = None  # per frame of the last encode_images: psam.SOURCES index, -1 skipped
+        self.timings = Counter()  # seconds per stage of the last encode_images
 
     # ------------------------------------------------------------------ preprocessing
     @torch.no_grad()
@@ -171,11 +183,14 @@ class FeatureExtractor:
         return crop.permute(1, 2, 0).cpu().numpy()
 
     @torch.no_grad()
-    def matte_and_crop(self, rgb: np.ndarray, padding_ratio: float = 0.1, box=None) -> tuple[np.ndarray, np.ndarray]:
+    def matte_and_crop(self, rgb: np.ndarray, padding_ratio: float = 0.1, box=None, pose=None) -> tuple[np.ndarray, np.ndarray]:
         """rgb uint8 (H,W,3) -> (cropped square float image in [0,1] (S,S,3), binary mask (H,W)).
 
         ``box`` (x0, y0, x1, y1): matte the person in that box (module doc, step c);
         ``None``: upstream's behaviour, the largest salient region.
+        ``pose`` (17, 3) keypoints ``x, y, score`` of that person: segment them with
+        pose-prompted SAM (step d; :attr:`last_matte` holds the details), falling back to
+        step c when SAM gives no plausible mask (then :attr:`last_matte` is ``None``).
         """
         import cv2
         from skimage.measure import label
@@ -186,6 +201,7 @@ class FeatureExtractor:
             rgb = cv2.resize(rgb, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
             h, w = rgb.shape[:2]
             box = None if box is None else np.asarray(box, float) * s
+            pose = None if pose is None else np.asarray(pose, float) * [s, s, 1]
         img = torch.from_numpy(rgb).to(self.device).float().permute(2, 0, 1) / 255.0
         if box is None:
             mask = self._foreground(img)
@@ -194,6 +210,23 @@ class FeatureExtractor:
             contours, _ = cv2.findContours(mask.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             rect = cv2.boundingRect(max(contours, key=cv2.contourArea))
             return self._square_crop(img, mask, rect, padding_ratio), mask
+
+        self.last_matte = self.last_failure = None
+        if pose is not None:
+            t = time.perf_counter()
+            try:
+                res = psam.segment_person(rgb, box, pose, self.sam_segmenter(), self.person_sam)
+            except psam.NoPersonMask as e:
+                res, self.last_failure = None, e  # fall through to the person path below
+            self.timings["sam"] += time.perf_counter() - t
+            if res is not None:
+                self.last_matte = res
+                rx0, ry0, rx1, ry1 = res.region
+                ys, xs = np.nonzero(res.mask)
+                rect = (xs.min(), ys.min(), xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
+                mask = np.zeros((h, w), bool)
+                mask[ry0:ry1, rx0:rx1] = res.mask
+                return self._square_crop(img[:, ry0:ry1, rx0:rx1], res.mask, rect, padding_ratio), mask
 
         x0, y0, x1, y1 = box
         half = max(x1 - x0, y1 - y0) * self.person_context / 2
@@ -293,6 +326,44 @@ class FeatureExtractor:
         print(f"[features] person detected in {found}/{len(dets)} frames")
         return track_subject(dets)
 
+    def pose_estimator(self) -> psam.PoseEstimator:
+        if self._pose is None:
+            self._pose = psam.PoseEstimator(self.person_sam.pose, self.device)
+        return self._pose
+
+    def sam_segmenter(self) -> psam.SamSegmenter:
+        if self._sam is None:
+            self._sam = psam.SamSegmenter(self.person_sam.sam, self.device)
+        return self._sam
+
+    def estimate_poses(self, paths: list[Path], boxes: np.ndarray, progress: bool = True) -> psam.PersonPoses:
+        """2D pose of the tracked person (``boxes`` (N, 4)) in every frame, with rotation
+        test-time augmentation (``person_sam.rotations``). People smaller than
+        ``person_sam.min_person`` get no pose (all scores 0)."""
+        import cv2
+        from tqdm import tqdm
+
+        cfg = self.person_sam
+        n, rots = len(paths), cfg.rotations
+        kps = np.zeros((n, 17, 3), np.float32)
+        rotation, rot_scores = np.zeros(n, np.int16), np.zeros((n, len(rots)), np.float32)
+        t = time.perf_counter()
+        for i, p in enumerate(tqdm(paths, desc="pose") if progress else paths):
+            b = np.asarray(boxes[i], float)
+            if max(b[2] - b[0], b[3] - b[1]) < cfg.min_person:
+                continue
+            rgb = cv2.cvtColor(cv2.imread(str(p), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+            allk, means = self.pose_estimator()(rgb, b, rots)
+            j = psam.choose_rotation(means, rots, cfg.upright_margin)
+            kps[i], rotation[i], rot_scores[i] = allk[j], rots[j], means
+        posed = rot_scores.any(1)
+        if progress:
+            turns = ", ".join(f"{r} deg: {int((rotation[posed] == r).sum())}" for r in rots)
+            mean = float(kps[posed, :, 2].mean()) if posed.any() else 0.0
+            print(f"[features] pose in {int(posed.sum())}/{n} frames ({(time.perf_counter() - t) / max(n, 1):.2f} s/frame), "
+                  f"mean keypoint score {mean:.2f}; kept rotation {turns}")
+        return psam.PersonPoses(np.asarray(boxes, np.float32), kps, rotation, rot_scores)
+
     # ------------------------------------------------------------------ features
     @torch.no_grad()
     def dino(self, crops: list[np.ndarray]) -> np.ndarray:
@@ -306,24 +377,34 @@ class FeatureExtractor:
         return torch.cat(out).numpy()  # (N, 257, 1024)
 
     def encode_images(self, paths: list[Path], crops_dir: Path | None = None, progress: bool = True,
-                      boxes: np.ndarray | None = None):
+                      boxes: np.ndarray | None = None, poses: np.ndarray | None = None):
         """Returns (features (N,257,1024) float32, list of valid indices).
 
         ``boxes`` (N, 4): per-frame person boxes (:meth:`track_people`); matte only that person.
+        ``poses`` (N, 17, 3): that person's keypoints (:meth:`estimate_poses`); segment them with
+        pose-prompted SAM. :attr:`mask_sources` then records which matte each frame got.
         """
         import cv2
         from tqdm import tqdm
 
         crops, ok = [], []
         self.ungated = 0
+        self.timings = Counter()
+        self.mask_sources = None if poses is None else np.full(len(paths), -1, np.int8)
         it = tqdm(paths, desc="matte+crop") if progress else paths
         for i, p in enumerate(it):
             bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
+            t = time.perf_counter()
             try:
-                crop, _ = self.matte_and_crop(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), box=None if boxes is None else boxes[i])
+                crop, _ = self.matte_and_crop(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), box=None if boxes is None else boxes[i],
+                                              pose=None if poses is None else poses[i])
             except ValueError as e:
                 print(f"[features] skip {p}: {e}")
                 continue
+            finally:
+                self.timings["matte"] += time.perf_counter() - t
+            if poses is not None:
+                self.mask_sources[i] = psam.SOURCES.index(self.last_matte.source if self.last_matte else "rmbg")
             crops.append(crop)
             ok.append(i)
             if crops_dir is not None:
@@ -333,6 +414,12 @@ class FeatureExtractor:
             raise RuntimeError("no frame could be matted")
         if boxes is not None and self.ungated:
             print(f"[features] person segmenter missed the person in {self.ungated}/{len(paths)} frames: RMBG mask kept as is")
+        if self.mask_sources is not None:
+            counts = {name: int((self.mask_sources == k).sum()) for k, name in enumerate(psam.SOURCES)}
+            counts["skipped"] = int((self.mask_sources < 0).sum())
+            sam = self.timings["sam"] / len(paths)
+            print(f"[features] person_sam masks per source: {counts}; s/frame: SAM {sam:.2f}, "
+                  f"RMBG fallback {self.timings['matte'] / len(paths) - sam:.2f}")
         feats = []
         it = range(0, len(crops), self.batch_size)
         for i in tqdm(it, desc="dinov2") if progress else it:

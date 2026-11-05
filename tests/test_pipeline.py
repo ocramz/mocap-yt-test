@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from mocap_yt import video
+from mocap_yt.person_sam import PersonPoses, PersonSamConfig
 from mocap_yt.pipeline import PipelineConfig, RigConfig, Sample, prepare_sample, sample_features
 from mocap_yt.upstream import PROJECT_ROOT
 
@@ -22,6 +23,7 @@ def test_sample_ranges():
         Sample("f", "x.mp4", start="1:75")
     with pytest.raises(ValueError, match="subject"):
         Sample("g", "x.mp4", subject="cat")
+    assert Sample("h", "x.mp4", subject="person_sam").subject == "person_sam"
 
 
 def test_prepare_sample_rebuilds_on_range_change(synth, tmp_path):
@@ -42,13 +44,21 @@ class StubExtractor:
 
     def __init__(self):
         self.calls = []
+        self.mask_sources = None
 
     def track_people(self, frames):
         self.calls.append("track")
         return np.tile([1.0, 2.0, 3.0, 4.0], (len(frames), 1))
 
-    def encode_images(self, frames, crops_dir=None, boxes=None):
-        self.calls.append("encode+boxes" if boxes is not None else "encode")
+    def estimate_poses(self, frames, boxes):
+        self.calls.append("pose")
+        n = len(frames)
+        return PersonPoses(boxes, np.full((n, 17, 3), 0.5), np.zeros(n, int), np.zeros((n, 4)))
+
+    def encode_images(self, frames, crops_dir=None, boxes=None, poses=None):
+        self.calls.append("encode" + ("+boxes" if boxes is not None else "") + ("+poses" if poses is not None else ""))
+        if poses is not None:
+            self.mask_sources = np.array([0, 2, -1][: len(frames)], np.int8)
         return np.zeros((len(frames), 2, 3), np.float32), list(range(len(frames)))
 
 
@@ -66,6 +76,48 @@ def test_features_are_cached_per_subject(tmp_path):
     np.savez_compressed(tmp_path / "features.npz", image_embed=np.zeros((3, 2, 3), np.float16), frame_indices=np.arange(3))
     sample_features(tmp_path, frames, ext, subject="salient")
     assert ext.calls[-1] == "encode+boxes"
+
+
+def test_person_sam_features_and_pose_caches(tmp_path):
+    frames = [tmp_path / f"{i:05d}.png" for i in range(3)]
+    ext, cfg = StubExtractor(), PersonSamConfig()
+    sample_features(tmp_path, frames, ext, subject="person_sam", person_sam=cfg)
+    assert ext.calls == ["track", "pose", "encode+boxes+poses"]
+    z = np.load(tmp_path / "features.npz")
+    assert str(z["subject"]) == "person_sam" and str(z["matting"]) == cfg.tag()
+    assert z["person_keypoints"].shape == (3, 17, 3) and z["mask_source"].tolist() == [0, 2, -1]
+    assert (tmp_path / "poses.npz").exists()
+    sample_features(tmp_path, frames, ext, subject="person_sam", person_sam=cfg)  # cache hit
+    assert len(ext.calls) == 3
+    sample_features(tmp_path, frames, ext, subject="person_sam", person_sam=PersonSamConfig(max_points=4))
+    assert ext.calls[3:] == ["encode+boxes+poses"]  # a SAM setting: re-matte, keep the poses
+    sample_features(tmp_path, frames, ext, subject="person_sam", person_sam=PersonSamConfig(max_points=4, rotations=[0]))
+    assert ext.calls[4:] == ["track", "pose", "encode+boxes+poses"]  # a pose setting: everything
+    sample_features(tmp_path, frames, ext, subject="person")  # other subjects ignore the person_sam settings
+    assert ext.calls[7:] == ["track", "encode+boxes"]
+
+
+def test_person_sam_needs_a_person(tmp_path):
+    class Nobody(StubExtractor):
+        def track_people(self, frames):
+            return None
+
+    with pytest.raises(RuntimeError, match="no person"):
+        sample_features(tmp_path, [tmp_path / "00000.png"], Nobody(), subject="person_sam")
+
+
+def test_person_sam_config_block(tmp_path):
+    y = tmp_path / "c.yaml"
+    y.write_text("person_sam:\n  sam: facebook/sam2.1-hiera-tiny\n  rotations: [0, 180]\n"
+                 "samples:\n  - {id: a, source: x.mp4, subject: person_sam}\n")
+    cfg = PipelineConfig.load(y)
+    assert cfg.person_sam.sam == "facebook/sam2.1-hiera-tiny" and cfg.person_sam.rotations == (0, 180)
+    assert cfg.samples[0].subject == "person_sam"
+    y.write_text("samples: []\n")
+    assert PipelineConfig.load(y).person_sam == PersonSamConfig()
+    y.write_text("person_sam:\n  sam_checkpoint: x\n")
+    with pytest.raises(TypeError):
+        PipelineConfig.load(y)
 
 
 def test_configured_local_samples_are_importable():

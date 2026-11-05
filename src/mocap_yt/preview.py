@@ -129,3 +129,79 @@ def contact_strip(frames_dir: Path, dst: Path, n: int = 6) -> Path:
         out.paste(im, (0, k * h))
     out.save(dst)
     return dst
+
+
+# --------------------------------------------------------------------- matting comparison
+BOX_RGB, BONE_RGB, UNSURE_RGB = (40, 120, 255), (40, 200, 70), (170, 170, 170)
+PROMPT_RGB, PROMPT_BOX_RGB, MASK_RGB = (255, 30, 30), (255, 160, 0), (230, 0, 230)
+
+
+def annotate_person(rgb: np.ndarray, box, kps: np.ndarray | None, region, kp_score: float = 0.4, matte=None) -> Image.Image:
+    """``region`` (x0, y0, x1, y1) of a frame, with the tracked ``box`` (blue), the pose's bones
+    (green; grey below ``kp_score``) and, for a person_sam ``matte``, its prompt points (red),
+    prompt box (orange) and mask outline (magenta)."""
+    import cv2
+
+    from .person_sam import BONES
+
+    x0, y0, x1, y1 = (int(v) for v in region)
+    img = np.ascontiguousarray(rgb[y0:y1, x0:x1])
+    sc = max(1.0, 240 / max(img.shape[:2]))  # draw on an enlarged copy so thin lines stay visible
+    img = cv2.resize(img, (round(img.shape[1] * sc), round(img.shape[0] * sc)), interpolation=cv2.INTER_LINEAR)
+
+    def pt(p, off=(x0, y0)):
+        return int(round((p[0] - off[0]) * sc)), int(round((p[1] - off[1]) * sc))
+
+    if matte is not None:
+        m = cv2.resize(matte.mask.astype(np.uint8), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+        contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(img, contours, -1, MASK_RGB, 2)
+    cv2.rectangle(img, pt(box[:2]), pt(box[2:]), BOX_RGB, 1)
+    if kps is not None and kps[:, 2].any():
+        for a, b in BONES:
+            sure = min(kps[a, 2], kps[b, 2]) >= kp_score
+            cv2.line(img, pt(kps[a]), pt(kps[b]), BONE_RGB if sure else UNSURE_RGB, 2 if sure else 1)
+    if matte is not None:
+        p = matte.prompt
+        cv2.rectangle(img, pt(p.box[:2], (0, 0)), pt(p.box[2:], (0, 0)), PROMPT_BOX_RGB, 1)
+        for q, lab in zip(p.points, p.labels):
+            cv2.drawMarker(img, pt(q, (0, 0)), PROMPT_RGB if lab else BOX_RGB, cv2.MARKER_CROSS, 9, 2)
+    return Image.fromarray(img)
+
+
+def _fit(img: Image.Image | None, size: int) -> Image.Image:
+    """``img`` scaled to fit a white ``size`` x ``size`` square (blank if ``None``)."""
+    out = Image.new("RGB", (size, size), "white")
+    if img is not None:
+        s = size / max(img.size)
+        im = img.convert("RGB").resize((max(1, round(img.width * s)), max(1, round(img.height * s))))
+        out.paste(im, ((size - im.width) // 2, (size - im.height) // 2))
+    return out
+
+
+def matte_sheet(sections, modes: list[str], dst: Path, tile: int = 160, label_width: int = 110) -> Path:
+    """Matting modes side by side. ``sections``: ``[(name, [(t, annotated input, {mode: (crop
+    image | None, caption)}), ...]), ...]``; one block per sample, one column per frame, rows:
+    the annotated input, then each mode's crop (what DINOv2 sees)."""
+    blocks = []
+    for name, frames in sections:
+        width = label_width + tile * len(frames)
+        rows = [Image.new("RGB", (width, 22), "white")]
+        ImageDraw.Draw(rows[0]).text((4, 6), name, fill=(0, 0, 0))
+        lines = [("input", [(label(_fit(a, tile), f"#{t}"), None) for t, a, _ in frames])]
+        lines += [(mode, [(_fit(c[mode][0], tile), c[mode][1]) for _, _, c in frames]) for mode in modes]
+        for row_name, tiles in lines:
+            row = Image.new("RGB", (width, tile), "white")
+            ImageDraw.Draw(row).text((4, tile // 2 - 6), row_name, fill=(0, 0, 0))
+            for k, (im, caption) in enumerate(tiles):
+                row.paste(label(im, caption) if caption and row_name != "input" else im, (label_width + k * tile, 0))
+            rows.append(row)
+        blocks += rows
+    out = Image.new("RGB", (max(b.width for b in blocks), sum(b.height for b in blocks)), "white")
+    y = 0
+    for b in blocks:
+        out.paste(b, (0, y))
+        y += b.height
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    out.save(dst)
+    return dst

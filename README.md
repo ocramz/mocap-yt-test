@@ -6,8 +6,11 @@ The output is BVH plus animated glTF.
 
 ```
 YouTube URL / local file / hf:// ──► clip (start–end, 15 fps, 720p) ──► frames
-     ──► [subject: person → person detector + tracker, RMBG ∩ person mask on a region around them]
-     ──► RMBG-1.4 matte + crop ──► DINOv2-large tokens (cached)
+     ──► matte one person on white + square crop, by `subject`:
+           salient     RMBG-1.4 on the whole frame (upstream)
+           person      person detector + tracker → RMBG ∩ person mask on a region around them
+           person_sam  same tracker → ViTPose keypoints → SAM 2.1 prompted with them
+     ──► DINOv2-large tokens (cached)
      ──► MocapAnything video2pose2rot  (conditioned on the Humanoid rig's reference frame)
      ──► joint positions + 6D rotations ──► BVH ──► glTF (skinned mannequin + bones)
                                                 └─► preview mp4 / screenshots
@@ -18,7 +21,7 @@ YouTube URL / local file / hf:// ──► clip (start–end, 15 fps, 720p) ─�
 ```bash
 git submodule update --init           # third_party/MocapAnything (pinned)
 uv sync                               # CPU-only torch from download.pytorch.org/whl/cpu
-uv run mocap-yt setup                 # weights: MocapAnything ckpt, RMBG-1.4, DINOv2-large, T5-base, person detector/segmenter
+uv run mocap-yt setup                 # weights: MocapAnything ckpt, RMBG-1.4, DINOv2-large, T5-base, person detector/segmenter, ViTPose, SAM 2.1
 uv run mocap-yt rig                   # generate the humanoid + its MocapAnything dataset
 uv run mocap-yt run --publish         # every sample in configs/samples.yaml
 uv run mocap-yt run demo_trap --publish   # ...or selected ids
@@ -28,11 +31,12 @@ uv run --group dev pytest             # tests
 
 To add a video, add an entry to [`configs/samples.yaml`](configs/samples.yaml) with an `id`,
 a `source` (a URL, a path relative to the repo root, or `hf://…`), and optionally `start` +
-`end` (or `duration`), `height`, `crop`, `subject` (see
+`end` (or `duration`), `height`, `crop`, `subject` (`salient`, `person` or `person_sam`, see
 [below](#in-the-wild-footage-subject-person)) and `cookies`. Times are seconds or
 `"[[HH:]MM:]SS[.fff]"` strings such as `"3:33.5"`. Every stage writes into `work/` (gitignored)
 and is skipped if its output already exists. Changing a sample's range, `fps`, `height` or `crop`
-rebuilds its clip and features; changing `subject` recomputes its features. `--publish` copies
+rebuilds its clip and features; changing `subject` (or a `person_sam:` setting, for those samples)
+recomputes its features. `--publish` copies
 the lightweight results into `assets/samples/<id>/`.
 
 ### Picking and trimming time ranges
@@ -72,9 +76,10 @@ pre-trimmed files: it cuts each sample's `start`–`end` out of the source.
 | `src/mocap_yt/render.py` | CPU z-buffer rasterizer + skeleton overlays (no OpenGL/Blender needed) |
 | `src/mocap_yt/rig_assets.py` | builds the MocapAnything **"species" dataset** for a rig without Blender (see below) |
 | `src/mocap_yt/features.py` | CPU port of upstream's RMBG + crop + DINOv2 preprocessing (upstream's version hard-codes CUDA), plus person-guided matting for in-the-wild footage |
+| `src/mocap_yt/person_sam.py` | pose-prompted SAM matting (`subject: person_sam`): ViTPose with rotation test-time augmentation, prompts from keypoints, SAM 2.1, mask clean-up and checks |
 | `src/mocap_yt/inference.py` | loads the released checkpoint, runs `video2pose2rot`, sliding windows for clips longer than 300 frames, BVH export |
 | `src/mocap_yt/video.py` | yt-dlp download, timestamp parsing, ffmpeg trim/resample, timestamped contact sheets, frame extraction |
-| `src/mocap_yt/pipeline.py`, `cli.py` | config-driven orchestration (`mocap-yt …`) |
+| `src/mocap_yt/pipeline.py`, `cli.py` | config-driven orchestration (`mocap-yt …`), including `mocap-yt matte` to compare matting modes on a few frames |
 | `scripts/gltf_screenshots.sh` | renders published GLBs in three.js (headless Chromium via Playwright); all of them, or the ones given as arguments |
 | `third_party/MocapAnything` | upstream, git submodule pinned at `c99fb22` |
 | `assets/rigs/humanoid/` | the generated rig: BVH, glTF/GLB, previews, reference render |
@@ -145,6 +150,75 @@ processed that way. The preview's "model input" tile shows the crop DINOv2 actua
 
 ![salient vs person matting](assets/samples/matting_salient_vs_person.png)
 
+### Pose-prompted SAM: `subject: person_sam`
+
+`subject: person` still loses the person wherever both RMBG and the person segmenter do: an
+arm or leg that is motion-blurred at 15 fps, grey clothes against the grey studio wall, a body
+upside down. The mask then drops limbs, falls apart into blobs, or keeps a piece of wall bar.
+`subject: person_sam` keeps the same tracker but builds the mask from the person's 2D pose
+([`person_sam.py`](src/mocap_yt/person_sam.py)):
+
+1. **Pose.** ViTPose-B (COCO-17 keypoints, top-down on the tracked box) runs on the frame
+   turned by 0, 90, 180 and 270° in one batch. The turn with the best mean keypoint score is
+   kept (it must beat upright by 0.05) and its keypoints are mapped back. COCO has hardly any
+   upside-down people. ViTPose is about as sure of a sideways person as of an upright one,
+   but not of an upside-down one, so on a windmill this picks a view it can read.
+2. **Prompt.** Up to 8 positive points inside the body:
+   * the torso centre and the head;
+   * a point on each forearm and shin: the wrist or ankle moved 20 % toward the elbow or knee,
+     because a point on the very tip of a limb sits on its outline and pulls background in;
+   * the knees.
+
+   The box prompt is the tracked box grown to hold every confident keypoint. With fewer than
+   3 points, or a person under 40 px, the prompt is the box alone.
+3. **SAM 2.1** (Hiera-S) runs on a square region twice the person's size (at least 160 px), so
+   a distant skater is enlarged. The region is encoded once; the decoder tries the points and
+   box, then the box alone.
+4. **Clean-up.**
+   * Small holes are filled.
+   * Thin bars are opened away, except along the stick figure, so thin blurred forearms stay.
+   * The mask is clipped to the box plus 25 %, and only the parts that hold a keypoint or a
+     prompt point are kept.
+5. **Check.** A mask is used when:
+   * SAM reports an object;
+   * its own IoU estimate is ≥ 0.5;
+   * it holds ≥ 75 % of the prompt points;
+   * it fills 8–90 % of the box.
+
+   Otherwise that frame is matted as with `subject: person`. `prediction.json` counts how many
+   frames got each kind of mask (`person_sam.mask_source`).
+
+**Cost on 4 vCPUs.** Pose takes 0.5 s/frame (the four turns in one batch) and SAM 1.5 s/frame.
+RMBG and the person segmenter, about 2.5 s/frame, only run on fallback frames. The six tutorial
+clips take 39 min with `person_sam` instead of 52 min with `person`.
+
+**On the tutorial clips:**
+* On 41 frames picked across the six clips and checked by eye, including every bad frame
+  mentioned [below](#tutorial-videos-in-assetssamples), the `person` crop loses a limb, falls
+  apart, or keeps a bar, beam or floor patch in 21. None of the `person_sam` crops do.
+* Both modes keep ice spray where it touches the skates.
+* Of the 644 frames of the five clips that now use `person_sam`:
+  * 634 got a points + box mask;
+  * 10 got a box-only mask (a distant skater, or a pose too unsure);
+  * none fell back to RMBG.
+
+The checkpoints and the pose rotations are set in the `person_sam:` block of
+`configs/samples.yaml`. The other knobs are fields of `PersonSamConfig`. Changing any of them
+recomputes the features of the `person_sam` samples, and the cached poses (`poses.npz`) are
+kept unless a pose setting changed.
+
+To compare matting modes on a few frames without running the capture:
+
+```bash
+uv run mocap-yt matte windmill:0,30,60,71,89,119 hockey_stop:0,43 --modes person person_sam
+```
+
+This writes `work/matte/<ids>.png` and a `.json` with each frame's chosen rotation and SAM
+statistics. The PNG shows the input around the person with overlays (blue: tracked box; green:
+pose; red: prompt points; orange: prompt box; magenta: SAM mask), then each mode's crop.
+
+![person vs person_sam matting](assets/samples/matting_person_vs_person_sam.png)
+
 ## Results so far
 
 | sample | source | frames | status |
@@ -168,7 +242,9 @@ skates, title cards, a subscribe overlay and cuts (hockey) or cross-fades (windm
 detection doesn't catch); the windmill studio also has a wall mirror. The six ranges above were
 picked with `mocap-yt sheet` at 3 s, then 0.5 s, then 0.1 s around each boundary. Each is one
 continuous shot with the whole body in view, the windmill ones from the camera angle without
-the mirror. All six run with `subject: person` at the source's 360p (`height: 360`):
+the mirror. All six run at the source's 360p (`height: 360`). Five use `subject: person_sam`.
+The stance drill, which `person` already mattes cleanly, keeps `subject: person`: both modes
+give the same crops there (5.5 cm with `person_sam`).
 
 ```bash
 uv run mocap-yt run hockey_stance_drill hockey_stop_close hockey_stop windmill_drill windmill windmill_entry --publish
@@ -176,26 +252,27 @@ scripts/gltf_screenshots.sh assets/samples/{hockey,windmill}*/*.glb
 uv run mocap-yt gallery hockey_stance_drill hockey_stop_close hockey_stop windmill_drill windmill windmill_entry -o assets/samples/yt_tutorials_gallery.png
 ```
 
-That takes about 52 min on 4 vCPUs, nearly all of it matting. Model input next to the capture,
-5 frames per clip:
+That takes about 40 min on 4 vCPUs (52 min when all six used `subject: person`), nearly all of
+it pose and SAM, or RMBG. Model input next to the capture, 5 frames per clip:
 
 ![tutorial gallery](assets/samples/yt_tutorials_gallery.png)
 
 | sample | FK vs. pred | what the capture shows |
 |---|---|---|
 | `hockey_stance_drill` | 5.4 cm | The hip-turn drill in place, facing the camera. The knee bend, forward lean, lowered head and hanging arms are all there. |
-| `hockey_stop_close` | 13.4 cm (17.2 salient) | The skater comes in from about 25 px tall and stops right at a low fisheye camera. The wide-legged stop stance is captured; the far-away start and the spray are rough. |
-| `hockey_stop` | 14.7 cm (17.9 salient) | Approach, stop in a cloud of ice spray, sideways knees-bent stance. Right before and after the stop; at the stop itself the spray hides the legs. |
-| `windmill_drill` | 23.6 cm | Floor drill: all fours, folded, legs up. The gross configuration is right (on the floor, inverted with legs up); limb placement is unreliable. |
-| `windmill` | 31.3 cm | Continuous windmills: the upside-down, legs-up V is there, with heavy motion blur at 360p. On frames the person segmenter misses, the crop can carry a piece of the wall bar or floor. |
-| `windmill_entry` | 26.7 cm | The standing lunge into the move is captured well, then as `windmill`. |
+| `hockey_stop_close` | 12.7 cm (13.4 person, 17.2 salient) | The skater comes in from about 25 px tall and stops right at a low fisheye camera. The wide-legged stop stance is captured, now with both arms out; the matte no longer picks up a ceiling beam. The far-away start and the spray are rough. |
+| `hockey_stop` | 12.2 cm (14.7 person, 17.9 salient) | Approach, stop in a cloud of ice spray, sideways knees-bent stance. Right before and after the stop. At the stop itself the spray hides the legs: the matte no longer falls apart there, but it keeps the spray around the skates. |
+| `windmill_drill` | 24.3 cm (23.6 person) | Floor drill: all fours, folded, legs up. The gross configuration is right (on the floor, inverted with legs up); limb placement is unreliable. |
+| `windmill` | 31.0 cm (31.3 person) | Continuous windmills: the upside-down, legs-up V is there, with heavy motion blur at 360p. The matte now holds the whole dancer on every frame. With `person`, frames the segmenter missed lost the blurred limbs or carried a piece of the wall bar or floor. |
+| `windmill_entry` | 24.5 cm (26.7 person) | The standing lunge into the move is captured well, then as `windmill`. |
 
-The FK-vs-pred column is the consistency metric below; "salient" is the same clip run with
-upstream's matting. It is no accuracy measure, since there is no ground truth, but it tracks
+The FK-vs-pred column is the consistency metric below; "person" and "salient" are the same clip
+run with those subjects. It is no accuracy measure, since there is no ground truth, but it tracks
 how unsure the model is: a stance drill gets better agreement than the demo clips, while
 upside-down floor moves, far from the Mixamo-style motions the model was trained on, get the
-worst. The model predicts no global trajectory, so the captured skaters don't travel across
-the rink.
+worst. Cleaner crops move it a little on the hockey clips and hardly at all on the floor moves:
+there the model's unfamiliarity with the motion dominates. The model predicts no global
+trajectory, so the captured skaters don't travel across the rink.
 
 Each `assets/samples/<id>/` holds:
 
@@ -224,6 +301,9 @@ around 8–10 cm on the demo clips. The model's two heads agree only approximate
   forward pass for 300 frames from about 107 s to about 16 s on 4 vCPUs.
 * CPU cost is dominated by preprocessing: RMBG-1.4 matting at 1024² plus DINOv2-large takes
   about 10 min per 300 frames on 4 vCPUs. The result is cached in `work/samples/<id>/features.npz`.
+  `subject: person_sam` replaces RMBG with ViTPose (0.5 s/frame) and SAM 2.1 (1.5 s/frame); its
+  poses are cached in `poses.npz` next to it.
 * Model licence: MocapAnything code and weights are MIT. RMBG-1.4 (BRIA AI) has its own,
   non-commercial terms. The person detector/segmenter are torchvision's COCO-trained weights
-  (BSD-3 code; COCO annotations are CC BY 4.0).
+  (BSD-3 code; COCO annotations are CC BY 4.0). SAM 2.1 (`facebook/sam2.1-hiera-*`) and ViTPose
+  (`usyd-community/vitpose-base-simple`) are Apache-2.0.

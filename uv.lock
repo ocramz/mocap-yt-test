@@ -694,7 +694,7 @@ requires-dist = [
     { name = "torch", specifier = "==2.9.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", specifier = "==0.24.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tqdm", specifier = ">=4.66" },
-    { name = "transformers", specifier = ">=4.46,<6" },
+    { name = "transformers", specifier = ">=5.22,<6" },
     { name = "trimesh", specifier = ">=4.4" },
     { name = "yt-dlp", specifier = ">=2025.1.1" },
 ]
