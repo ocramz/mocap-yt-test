@@ -2,10 +2,174 @@
  "rig": "Humanoid",
  "frames": 84,
  "fps": 15.0,
- "inference_seconds": 3.1,
+ "inference_seconds": 2.3,
  "fk_vs_pred_position_err_normalised": 0.1322,
  "fk_vs_pred_position_err_m": 0.1275,
  "bvh": "hockey_stop_close_humanoid.bvh",
+ "refine": {
+  "track2d": {
+   "raw": {
+    "pairs": 81,
+    "torso_flips": 0,
+    "lr_swaps": 0,
+    "lr_pairs": 70
+   },
+   "clean": {
+    "pairs": 79,
+    "torso_flips": 0,
+    "lr_swaps": 0,
+    "lr_pairs": 70
+   }
+  },
+  "error_2d_px": {
+   "refined": [
+    4.2,
+    13.6
+   ],
+   "raw_best_similarity": [
+    11.3,
+    31.4
+   ]
+  },
+  "sources": [
+   "ma_k0",
+   "ma_k1",
+   "ma_k2",
+   "ma_k3",
+   "ma_pos_k0",
+   "ma_pos_k1",
+   "ma_pos_k2",
+   "ma_pos_k3"
+  ],
+  "picks": {
+   "ma_k0/as_is": 84
+  },
+  "keypoints_read_swapped": 0,
+  "fit": {
+   "stage1": {
+    "2d": 1.408,
+    "prior": 0.0,
+    "smooth": 0.1163,
+    "cam": 0.004,
+    "hinge": 0.8608,
+    "spine": 0.0176
+   },
+   "stage2": {
+    "2d": 1.1235,
+    "prior": 0.0295,
+    "smooth": 0.1168,
+    "cam": 0.0044,
+    "hinge": 0.8608,
+    "spine": 0.0176
+   },
+   "stage3": {
+    "2d": 0.4591,
+    "prior": 0.1877,
+    "smooth": 0.033,
+    "cam": 0.0045,
+    "hinge": 0.003,
+    "spine": 0.0065
+   }
+  },
+  "metrics_raw": {
+   "frames": 84,
+   "fps": 15.0,
+   "root_speed_deg_s": [
+    37.3,
+    74.8,
+    87.7
+   ],
+   "root_acc_deg_s2": [
+    195.0,
+    528.0,
+    887.4
+   ],
+   "flips": 0,
+   "blips": 0,
+   "jitter_mm": [
+    0.3,
+    3.1,
+    22.9
+   ],
+   "floor_penetration_cm": 1.0,
+   "frames_below_2cm": 0.0,
+   "hinges": {
+    "LeftLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 4.9
+    },
+    "RightLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 15.7
+    },
+    "LeftForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 12.6
+    },
+    "RightForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 3.1
+    }
+   }
+  },
+  "metrics_refined": {
+   "frames": 84,
+   "fps": 15.0,
+   "root_speed_deg_s": [
+    25.8,
+    55.3,
+    58.7
+   ],
+   "root_acc_deg_s2": [
+    105.6,
+    226.9,
+    334.4
+   ],
+   "flips": 0,
+   "blips": 0,
+   "jitter_mm": [
+    0.7,
+    4.1,
+    15.0
+   ],
+   "floor_penetration_cm": 0.5,
+   "frames_below_2cm": 0.0,
+   "hinges": {
+    "LeftLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 2.2
+    },
+    "RightLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 7.6
+    },
+    "LeftForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 11.3
+    },
+    "RightForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 3.2
+    }
+   }
+  },
+  "settings": {
+   "refine": {
+    "views": [
+     0,
+     1,
+     2,
+     3
+    ],
+    "position_head": true,
+    "motionbert": false,
+    "depth": false,
+    "select": {},
+    "fit": {}
+   },
+   "version": 1
+  }
+ },
  "sample": "hockey_stop_close",
  "source": "assets/samples/Hockey Stop in 3 Minutes - Learn to Stop on Ice _ Tutorial_360p.mp4",
  "start": 206.6,
