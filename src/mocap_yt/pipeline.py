@@ -18,10 +18,12 @@ import yaml
 from . import upstream, video
 from .bvh import write_bvh
 from .mesh import build_mannequin
+from .person_sam import SOURCES, PersonPoses, PersonSamConfig, matting_tag
 from .rig_assets import RigSpec, build_rig_dataset, calibration_motion, reference_pose
 from .skeleton import mixamo_humanoid
 
 ASSETS = upstream.PROJECT_ROOT / "assets"
+SUBJECTS = ("salient", "person", "person_sam")
 
 
 @dataclass
@@ -44,8 +46,10 @@ class Sample:
     strings; give ``end`` or ``duration`` (or neither: to the end of the video).
 
     ``subject``: ``salient`` (upstream's preprocessing: matte the most salient region; fine
-    on plain backgrounds) or ``person`` (track the main person with a detector and matte
-    only them; for in-the-wild footage). See :mod:`mocap_yt.features`.
+    on plain backgrounds), ``person`` (track the main person with a detector and matte
+    only them; for in-the-wild footage) or ``person_sam`` (track them likewise, then segment
+    them with SAM prompted by their 2D pose; for blur, clothes the colour of the background,
+    upside-down poses). See :mod:`mocap_yt.features` and :mod:`mocap_yt.person_sam`.
     """
 
     id: str
@@ -61,8 +65,8 @@ class Sample:
     note: str = ""
 
     def __post_init__(self):
-        if self.subject not in ("salient", "person"):
-            raise ValueError(f"sample {self.id!r}: subject must be 'salient' or 'person', not {self.subject!r}")
+        if self.subject not in SUBJECTS:
+            raise ValueError(f"sample {self.id!r}: subject must be one of {', '.join(SUBJECTS)}, not {self.subject!r}")
         try:
             self.start = video.parse_time(self.start) or 0.0
             self.duration = video.parse_time(self.duration)
@@ -91,11 +95,13 @@ class PipelineConfig:
     rig: RigConfig = field(default_factory=RigConfig)
     samples: list[Sample] = field(default_factory=list)
     work: Path = upstream.WORK_DIR
+    person_sam: PersonSamConfig = field(default_factory=PersonSamConfig)  # settings of subject: person_sam
 
     @classmethod
     def load(cls, path: str | Path) -> "PipelineConfig":
         d = yaml.safe_load(Path(path).read_text())
-        return cls(rig=RigConfig(**d.get("rig", {})), samples=[Sample(**s) for s in d.get("samples", [])])
+        return cls(rig=RigConfig(**d.get("rig", {})), samples=[Sample(**s) for s in d.get("samples", [])],
+                   person_sam=PersonSamConfig(**(d.get("person_sam") or {})))
 
     @property
     def rig_root(self) -> Path:
@@ -167,7 +173,7 @@ def _invalidate(d: Path, params: dict):
     if old == params:
         return
     print(f"[{d.name}] clip parameters changed, rebuilding clip, frames and features")
-    stale = ["clip.mp4", "features.npz", "frames", "crops", "preview", "out"]
+    stale = ["clip.mp4", "features.npz", "poses.npz", "frames", "crops", "preview", "out"]
     if old.get("source") != params["source"]:
         stale.append("download")
     for name in stale:
@@ -197,29 +203,56 @@ def prepare_sample(cfg: PipelineConfig, s: Sample) -> tuple[Path, list[Path]]:
     return d, frames
 
 
-def sample_features(d: Path, frames: list[Path], extractor=None, subject: str = "salient") -> tuple[np.ndarray, list[int]]:
+def sample_features(d: Path, frames: list[Path], extractor=None, subject: str = "salient",
+                    person_sam: PersonSamConfig | None = None) -> tuple[np.ndarray, list[int]]:
     """DINOv2 tokens of every frame, cached in ``features.npz`` with the ``subject`` mode
-    they were computed with (``salient``: upstream's matting; ``person``: person-guided)."""
+    they were computed with (``salient``: upstream's matting; ``person``: person-guided;
+    ``person_sam``: pose-prompted SAM, whose settings ``person_sam`` are part of the cache key)."""
     cache = d / "features.npz"
+    tag = matting_tag(subject, person_sam)
     if cache.exists():
         z = np.load(cache, allow_pickle=False)
         cached = str(z["subject"]) if "subject" in z.files else "salient"
-        if cached == subject:
+        cached_tag = str(z["matting"]) if "matting" in z.files else ""
+        if cached == subject and cached_tag == tag:
             return z["image_embed"].astype(np.float32), z["frame_indices"].tolist()
-        print(f"[{d.name}] subject {cached} -> {subject}: recomputing features")
+        if cached != subject:
+            print(f"[{d.name}] subject {cached} -> {subject}: recomputing features")
+        else:
+            print(f"[{d.name}] {subject} settings changed: recomputing features")
     if extractor is None:
         from .features import FeatureExtractor
 
-        extractor = FeatureExtractor()
+        extractor = FeatureExtractor(person_sam=person_sam or PersonSamConfig())
     crops = d / "crops"
     if crops.exists():
         shutil.rmtree(crops)
-    boxes = extractor.track_people(frames) if subject == "person" else None
-    feats, ok = extractor.encode_images(frames, crops_dir=crops, boxes=boxes)
-    extra = {} if boxes is None else {"person_boxes": boxes.astype(np.float32)}
+    if subject == "person_sam":
+        poses = person_poses(d, frames, extractor, person_sam or PersonSamConfig())
+        feats, ok = extractor.encode_images(frames, crops_dir=crops, boxes=poses.boxes, poses=poses.keypoints)
+        extra = {"matting": np.array(tag), "person_boxes": poses.boxes.astype(np.float32),
+                 "person_keypoints": poses.keypoints.astype(np.float32), "mask_source": extractor.mask_sources}
+    else:
+        boxes = extractor.track_people(frames) if subject == "person" else None
+        feats, ok = extractor.encode_images(frames, crops_dir=crops, boxes=boxes)
+        extra = {} if boxes is None else {"person_boxes": boxes.astype(np.float32)}
     np.savez_compressed(cache, image_embed=feats.astype(np.float16), frame_indices=np.array(ok),
                         subject=np.array(subject), **extra)
     return feats, ok
+
+
+def person_poses(d: Path, frames: list[Path], extractor, cfg: PersonSamConfig) -> PersonPoses:
+    """The tracked person's boxes and 2D pose in every frame, cached in ``poses.npz`` (keyed by
+    the pose settings, so changing only SAM settings doesn't re-run detector and pose)."""
+    path = d / "poses.npz"
+    poses = PersonPoses.load(path, cfg.pose_tag(), len(frames))
+    if poses is None:
+        boxes = extractor.track_people(frames)
+        if boxes is None:
+            raise RuntimeError(f"{d.name}: no person detected in any frame")
+        poses = extractor.estimate_poses(frames, boxes)
+        poses.save(path, cfg.pose_tag())
+    return poses
 
 
 def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, preview_every: int = 1) -> dict:
@@ -228,7 +261,7 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
     from .preview import BONE_RGBA, MANNEQUIN_RGBA, contact_strip, motion_video_frames
 
     d, frames = prepare_sample(cfg, s)
-    feats, ok = sample_features(d, frames, extractor, subject=s.subject)
+    feats, ok = sample_features(d, frames, extractor, subject=s.subject, person_sam=cfg.person_sam)
     pred = run_inference(feats, ok, cfg.rig_root, cfg.rig.name, model=model)
     out = d / "out"
     res = save_prediction(pred, out, cfg.rig_root, fps=s.fps, stem=f"{s.id}_{cfg.rig.name.lower()}")
@@ -246,6 +279,11 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
     video.contact_sheet(frames, out / f"{s.id}_input_contact_sheet.png")
     res.update(sample=s.id, source=s.source, start=s.start, end=s.end, duration=s.duration, subject=s.subject,
                glb=glb.name, preview=mp4.name)
+    if s.subject == "person_sam":
+        src = np.load(d / "features.npz")["mask_source"]
+        counts = {name: int((src == k).sum()) for k, name in enumerate(SOURCES)}
+        res["person_sam"] = {"sam": cfg.person_sam.sam, "pose": cfg.person_sam.pose,
+                             "mask_source": {**counts, "skipped": int((src < 0).sum())}}
     if s.note:
         res["note"] = s.note
     (out / "prediction.json").write_text(json.dumps(res, indent=1))

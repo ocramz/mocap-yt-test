@@ -2,17 +2,27 @@
  "rig": "Humanoid",
  "frames": 84,
  "fps": 15.0,
- "inference_seconds": 4.07,
- "fk_vs_pred_position_err_normalised": 0.1394,
- "fk_vs_pred_position_err_m": 0.1344,
+ "inference_seconds": 3.1,
+ "fk_vs_pred_position_err_normalised": 0.1322,
+ "fk_vs_pred_position_err_m": 0.1275,
  "bvh": "hockey_stop_close_humanoid.bvh",
  "sample": "hockey_stop_close",
  "source": "assets/samples/Hockey Stop in 3 Minutes - Learn to Stop on Ice _ Tutorial_360p.mp4",
  "start": 206.6,
  "end": 212.2,
  "duration": 5.6,
- "subject": "person",
+ "subject": "person_sam",
  "glb": "hockey_stop_close_humanoid.glb",
  "preview": "hockey_stop_close_preview.mp4",
+ "person_sam": {
+  "sam": "facebook/sam2.1-hiera-small",
+  "pose": "usyd-community/vitpose-base-simple",
+  "mask_source": {
+   "sam_pose": 84,
+   "sam_box": 0,
+   "rmbg": 0,
+   "skipped": 0
+  }
+ },
  "note": "skates in from far and stops right in front of a low wide-angle camera"
 }

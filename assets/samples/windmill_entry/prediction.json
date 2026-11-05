@@ -2,17 +2,27 @@
  "rig": "Humanoid",
  "frames": 125,
  "fps": 15.0,
- "inference_seconds": 5.89,
- "fk_vs_pred_position_err_normalised": 0.2768,
- "fk_vs_pred_position_err_m": 0.2669,
+ "inference_seconds": 3.57,
+ "fk_vs_pred_position_err_normalised": 0.2544,
+ "fk_vs_pred_position_err_m": 0.2453,
  "bvh": "windmill_entry_humanoid.bvh",
  "sample": "windmill_entry",
  "source": "assets/samples/How to Windmill _ Full Breakdancing Tutorial for Beginners_360p.mp4",
  "start": 326.7,
  "end": 335.0,
  "duration": 8.3,
- "subject": "person",
+ "subject": "person_sam",
  "glb": "windmill_entry_humanoid.glb",
  "preview": "windmill_entry_preview.mp4",
+ "person_sam": {
+  "sam": "facebook/sam2.1-hiera-small",
+  "pose": "usyd-community/vitpose-base-simple",
+  "mask_source": {
+   "sam_pose": 124,
+   "sam_box": 1,
+   "rmbg": 0,
+   "skipped": 0
+  }
+ },
  "note": "standing, entry, then windmills"
 }

@@ -2,17 +2,27 @@
  "rig": "Humanoid",
  "frames": 87,
  "fps": 15.0,
- "inference_seconds": 3.82,
- "fk_vs_pred_position_err_normalised": 0.1525,
- "fk_vs_pred_position_err_m": 0.1471,
+ "inference_seconds": 2.25,
+ "fk_vs_pred_position_err_normalised": 0.1263,
+ "fk_vs_pred_position_err_m": 0.1218,
  "bvh": "hockey_stop_humanoid.bvh",
  "sample": "hockey_stop",
  "source": "assets/samples/Hockey Stop in 3 Minutes - Learn to Stop on Ice _ Tutorial_360p.mp4",
  "start": 213.5,
  "end": 219.3,
  "duration": 5.8,
- "subject": "person",
+ "subject": "person_sam",
  "glb": "hockey_stop_humanoid.glb",
  "preview": "hockey_stop_preview.mp4",
+ "person_sam": {
+  "sam": "facebook/sam2.1-hiera-small",
+  "pose": "usyd-community/vitpose-base-simple",
+  "mask_source": {
+   "sam_pose": 86,
+   "sam_box": 1,
+   "rmbg": 0,
+   "skipped": 0
+  }
+ },
  "note": "skates in and does a hockey stop with ice spray, whole body in view"
 }
