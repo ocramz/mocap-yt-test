@@ -288,6 +288,9 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
         motion = Motion(motion.skeleton, ref.motion.local_rot, ref.motion.root_pos, s.fps)
         write_bvh(out / f"{stem}.bvh", motion)
         overlay = overlay_points(rig_skel, ref.camera_rot, ref.camera)
+        np.savez_compressed(out / f"{stem}_refine.npz", camera=ref.camera.astype(np.float32),
+                            rot_camera=ref.camera_rot.astype(np.float32), overlay=overlay.astype(np.float32),
+                            frame_indices=np.asarray(ok))
         res["refine"] = ref.report
 
     skel = motion.skeleton

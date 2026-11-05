@@ -127,3 +127,30 @@ def track_metrics(kps: np.ndarray, min_score: float = 0.4) -> dict:
     swap = np.einsum("ti,ti->t", lr[:-1], lr[1:]) < 0
     return {"pairs": int(pair.sum()), "torso_flips": int(np.sum(pair & (cos < 0))),
             "lr_swaps": int(np.sum(wide & swap)), "lr_pairs": int(wide.sum())}
+
+
+def keypoint_error_px(points: np.ndarray, kps: np.ndarray, pairs: dict[int, int], min_score: float = 0.3) -> list[float]:
+    """Distances (px) between projected joints ``points`` (T, J, 2) and COCO keypoints (T, 17, 3)
+    for ``pairs`` (COCO index -> joint index) where the keypoint is confident: [median, 90th]."""
+    k, j = list(pairs), list(pairs.values())
+    err = np.linalg.norm(points[:, j] - kps[:, k, :2], axis=-1)[kps[:, k, 2] >= min_score]
+    return _pct(err[np.isfinite(err)], (50, 90))
+
+
+def similarity_points(joints: np.ndarray, kps: np.ndarray, pairs: dict[int, int], min_score: float = 0.3) -> np.ndarray:
+    """Joints (T, J, 3, camera frame) placed on each frame by their best 2D similarity (scale,
+    in-plane turn, shift) onto the confident keypoints: the most generous projection of a capture
+    that has no camera of its own. Returns (T, J, 2) pixels."""
+    from .geometry import procrustes_2d
+
+    k, j = list(pairs), list(pairs.values())
+    out = np.full(joints.shape[:2] + (2,), np.nan)
+    for t in range(len(joints)):
+        w = np.where(kps[t, k, 2] >= min_score, kps[t, k, 2], 0.0)
+        if w.sum() < 1.5:
+            continue
+        s, a, tr, _ = procrustes_2d(joints[t, j, :2], kps[t, k, :2] * [1.0, -1.0], w)
+        r = np.radians(a)
+        rot = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
+        out[t] = (s * joints[t, :, :2] @ rot.T + tr) * [1.0, -1.0]
+    return out

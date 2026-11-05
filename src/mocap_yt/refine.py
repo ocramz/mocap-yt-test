@@ -136,6 +136,13 @@ def refine_sample(skel: Skeleton, d: Path, frames: list[Path], ok: list[int], pr
     raw = sources["ma_k0"]
     raw_motion = Motion(skel, from_camera(raw), ground_surface(skel, from_camera(raw), fps), fps)
     picks, counts = np.unique(np.array(sel.names)[sel.choice], return_counts=True)
+    from .fitting import COCO_TO_RIG
+    from .metrics import keypoint_error_px, similarity_points
+
+    _, raw_joints = forward_kinematics(skel, raw, np.zeros((len(raw), 3)))
+    report["error_2d_px"] = {  # [median, 90th] over confident body keypoints
+        "refined": keypoint_error_px(overlay_points(skel, fit.rot, fit.camera), k_fit, COCO_TO_RIG),
+        "raw_best_similarity": keypoint_error_px(similarity_points(raw_joints, k_fit, COCO_TO_RIG), k_fit, COCO_TO_RIG)}
     report.update({
         "sources": sorted(sources), "picks": dict(zip(picks.tolist(), counts.tolist())),
         "keypoints_read_swapped": int(sel.swapped.sum()), "fit": fit.report,
@@ -146,7 +153,8 @@ def refine_sample(skel: Skeleton, d: Path, frames: list[Path], ok: list[int], pr
         a, b = report["metrics_raw"], report["metrics_refined"]
         print(f"[refine] {d.name}: flips {a['flips']} -> {b['flips']}, root speed max {a['root_speed_deg_s'][2]} -> "
               f"{b['root_speed_deg_s'][2]} deg/s, jitter p95 {a['jitter_mm'][1]} -> {b['jitter_mm'][1]} mm, "
-              f"floor {a['floor_penetration_cm']} -> {b['floor_penetration_cm']} cm")
+              f"floor {a['floor_penetration_cm']} -> {b['floor_penetration_cm']} cm, 2D error median "
+              f"{report['error_2d_px']['raw_best_similarity'][0]} -> {report['error_2d_px']['refined'][0]} px")
     return Refined(motion, fit.camera, fit.rot, report)
 
 

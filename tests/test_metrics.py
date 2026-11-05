@@ -81,3 +81,18 @@ def test_track_metrics_counts_flips_and_swaps():
     k[7, [11, 12]] = k[7, [12, 11]]
     t = track_metrics(k)
     assert t["torso_flips"] == 2 and t["lr_swaps"] == 2
+
+
+def test_keypoint_errors_and_similarity_placement():
+    from mocap_yt.metrics import keypoint_error_px, similarity_points
+
+    joints = np.zeros((2, 3, 3))
+    joints[:, :, :2] = [[0, 0], [1, 0], [0, 1]]  # y up
+    kps = np.zeros((2, 17, 3))
+    kps[:, [5, 6, 7], :2] = [[100, 100], [120, 100], [100, 80]]  # same shape, scaled by 20, v down
+    kps[0, [5, 6, 7], 2] = 0.9
+    pairs = {5: 0, 6: 1, 7: 2}
+    pts = similarity_points(joints, kps, pairs)
+    np.testing.assert_allclose(pts[0], kps[0, [5, 6, 7], :2], atol=1e-9)
+    assert np.isnan(pts[1]).all()  # no confident keypoints in frame 1
+    assert keypoint_error_px(pts, kps, pairs) == [0.0, 0.0]
