@@ -31,7 +31,8 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = 1  # bump when the algorithm changes: cached person_sam features are recomputed
+VERSION = 1  # bump when the matting changes: cached person_sam features are recomputed
+POSE_VERSION = 2  # bump when the pose estimation changes: cached poses are recomputed, features kept
 
 FACE = (0, 1, 2, 3, 4)  # nose, eyes, ears
 SHOULDERS, TORSO = (5, 6), (5, 6, 11, 12)
@@ -77,7 +78,7 @@ class PersonSamConfig:
     def pose_tag(self) -> str:
         """Everything the cached poses depend on."""
         keys = ("pose", "rotations", "upright_margin", "min_person")
-        return json.dumps({**{k: getattr(self, k) for k in keys}, "version": VERSION}, sort_keys=True)
+        return json.dumps({**{k: getattr(self, k) for k in keys}, "version": POSE_VERSION}, sort_keys=True)
 
 
 def matting_tag(subject: str, cfg: PersonSamConfig | None) -> str:
@@ -101,11 +102,13 @@ class PersonPoses:
     keypoints: np.ndarray  # (N, 17, 3) x, y, score of the kept rotation (all 0: not estimated)
     rotation: np.ndarray  # (N,) degrees the frame was turned for the kept pose
     rot_scores: np.ndarray  # (N, R) mean keypoint score for each tried rotation
+    views: np.ndarray | None = None  # (N, R, 17, 3) keypoints of every tried rotation, mapped back
 
     def save(self, path: Path, tag: str):
+        extra = {} if self.views is None else {"views": self.views.astype(np.float32)}
         np.savez_compressed(path, boxes=self.boxes.astype(np.float32), keypoints=self.keypoints.astype(np.float32),
                             rotation=self.rotation.astype(np.int16), rot_scores=self.rot_scores.astype(np.float32),
-                            tag=np.array(tag))
+                            tag=np.array(tag), **extra)
 
     @classmethod
     def load(cls, path: Path, tag: str, n: int) -> "PersonPoses | None":
@@ -115,7 +118,7 @@ class PersonPoses:
         z = np.load(path, allow_pickle=False)
         if str(z["tag"]) != tag or len(z["boxes"]) != n:
             return None
-        return cls(z["boxes"], z["keypoints"], z["rotation"], z["rot_scores"])
+        return cls(z["boxes"], z["keypoints"], z["rotation"], z["rot_scores"], z["views"] if "views" in z.files else None)
 
 
 # ------------------------------------------------------------------------------ geometry
