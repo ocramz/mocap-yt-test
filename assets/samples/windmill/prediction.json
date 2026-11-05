@@ -1,0 +1,18 @@
+{
+ "rig": "Humanoid",
+ "frames": 120,
+ "fps": 15.0,
+ "inference_seconds": 5.65,
+ "fk_vs_pred_position_err_normalised": 0.3243,
+ "fk_vs_pred_position_err_m": 0.3127,
+ "bvh": "windmill_humanoid.bvh",
+ "sample": "windmill",
+ "source": "assets/samples/How to Windmill _ Full Breakdancing Tutorial for Beginners_360p.mp4",
+ "start": 317.6,
+ "end": 325.6,
+ "duration": 8.0,
+ "subject": "person",
+ "glb": "windmill_humanoid.glb",
+ "preview": "windmill_preview.mp4",
+ "note": "continuous windmills, final demonstration"
+}

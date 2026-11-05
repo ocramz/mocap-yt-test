@@ -60,9 +60,15 @@ def motion_video_frames(
     out_dir: Path,
     size: int = 400,
     every: int = 1,
+    crops: list[Path] | None = None,
 ) -> Path:
-    """Write per-frame composites: input | mannequin front | mannequin side + skeleton."""
+    """Write per-frame composites: input | model input | mannequin front | mannequin side + skeleton.
+
+    ``crops``: the matted crops DINOv2 saw, one per motion frame (the "model input" tile).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("*.png"):  # a previous, longer run would leak into the preview mp4
+        old.unlink()
     skel = motion.skeleton
     verts = skin(mesh, skel, motion.local_rot, motion.root_pos)
     _, jpos = forward_kinematics(skel, motion.local_rot, motion.root_pos)
@@ -73,12 +79,44 @@ def motion_video_frames(
         if input_frames:
             im = Image.open(input_frames[min(t, len(input_frames) - 1)]).convert("RGB")
             tiles.append(label(im.resize((round(im.width * size / im.height), size)), f"input #{t}"))
+        if crops:
+            c = crops[min(t, len(crops) - 1)]
+            im = Image.open(c).convert("RGB").resize((size, size)) if c.exists() else Image.new("RGB", (size, size), "white")
+            tiles.append(label(im, "model input"))
         for cam, name in zip(cams, ("front", "side")):
             img = render_mesh(verts[t], mesh.faces, cam, (size, size), color=(110, 190, 185))
             img = draw_skeleton(img, jpos[t], skel.parents, cam, skel.names, width=2, joint_radius=2)
             tiles.append(label(img, f"capture {name}"))
         hstack(tiles, height=size).save(out_dir / f"{t:05d}.png")
     return out_dir
+
+
+def gallery(samples: list[tuple[str, Motion, list[Path]]], mesh: SkinnedMesh, dst: Path, n: int = 5, size: int = 180) -> Path:
+    """One row per ``(name, motion, crops)``: ``n`` evenly spaced frames, each shown as the
+    model input (matted crop) next to the captured pose (front view)."""
+    rows = []
+    for name, motion, crops in samples:
+        skel = motion.skeleton
+        verts = skin(mesh, skel, motion.local_rot, motion.root_pos)
+        _, jpos = forward_kinematics(skel, motion.local_rot, motion.root_pos)
+        cam = fit_camera(verts.reshape(-1, 3), azim_deg=0, elev_deg=8, margin=1.0)
+        tiles = []
+        for k in range(n):
+            t = round(k * (motion.num_frames - 1) / max(1, n - 1))
+            c = crops[min(t, len(crops) - 1)] if crops else None
+            im = Image.open(c).convert("RGB").resize((size, size)) if c and c.exists() else Image.new("RGB", (size, size), "white")
+            cap = render_mesh(verts[t], mesh.faces, cam, (size, size), color=(110, 190, 185))
+            cap = draw_skeleton(cap, jpos[t], skel.parents, cam, skel.names, width=2, joint_radius=2)
+            tiles += [label(im, f"{name} #{t}" if k == 0 else f"#{t}"), cap]
+        rows.append(hstack(tiles))
+    out = Image.new("RGB", (max(r.width for r in rows), sum(r.height for r in rows)), "white")
+    y = 0
+    for r in rows:
+        out.paste(r, (0, y))
+        y += r.height
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    out.save(dst)
+    return dst
 
 
 def contact_strip(frames_dir: Path, dst: Path, n: int = 6) -> Path:
