@@ -108,3 +108,14 @@ def test_fit_motion_recovers_a_noisy_capture():
     from mocap_yt.bvh import Motion
     jit = lambda r: jitter_mm(body_frame(SK, Motion(SK, r, np.zeros((30, 3)), 15.0)), 15.0)[0]
     assert jit(fit.rot) < 0.5 * jit(init)
+
+
+def test_ground_surface_keeps_the_body_above_the_floor():
+    from mocap_yt.refine import ground_surface
+
+    rot = dancer(T=30)
+    root = ground_surface(SK, rot, 15.0)
+    _, p = forward_kinematics(SK, rot, root)
+    low = (p[..., 1] - SK.radii).min(1)
+    assert low.min() > -0.0101 and np.median(np.abs(low)) < 0.02  # at most 1 cm under, and resting on it
+    assert (root[:, [0, 2]] == 0).all()

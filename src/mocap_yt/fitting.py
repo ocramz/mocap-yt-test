@@ -242,7 +242,7 @@ def transition_costs(c: Candidates, cfg: SelectConfig, fps: float):
 
 @dataclass
 class Selection:
-    rot: np.ndarray  # (T, J, 3, 3) chosen local rotations, camera frame
+    rot: np.ndarray  # (T, J, 3, 3) chosen local rotations, camera frame, turned in-plane onto the keypoints
     choice: np.ndarray  # (T,) index into names
     names: list[str]
     fit: np.ndarray  # (T, 4) similarity of the chosen candidate onto the keypoints
@@ -260,7 +260,13 @@ def select_hypotheses(skel: Skeleton, sources: dict[str, np.ndarray], kps: np.nd
     cost, fits, swapped = frame_costs(c, kps, cfg, torso_px or torso_length(kps), depth_votes)
     path, total = viterbi(cost, transition_costs(c, cfg, fps))
     T = len(path)
-    return Selection(c.rot[np.arange(T), path], path, c.names, fits[np.arange(T), path], swapped[np.arange(T), path], total)
+    rot = c.rot[np.arange(T), path].copy()
+    fit = fits[np.arange(T), path]
+    support = (kps[:, list(BODY_KPS), 2] >= 0.3).sum(1)
+    for t in range(T):  # turn each pose by the in-plane angle its 2D fit needed (about +Z_c), where the fit is trustworthy
+        if support[t] >= 5:
+            rot[t, 0] = rz(float(np.clip(fit[t, 1], -60, 60))) @ rot[t, 0]
+    return Selection(rot, path, c.names, fit, swapped[np.arange(T), path], total)
 
 
 # ---------------------------------------------------------------------------- stage C
@@ -268,10 +274,10 @@ def select_hypotheses(skel: Skeleton, sources: dict[str, np.ndarray], kps: np.nd
 class FitConfig:
     iters: tuple[int, int, int] = (60, 120, 300)  # camera only, + root, + everything
     lr: float = 0.03
-    robust: float = 0.1  # Geman-McClure scale of the 2D residual, in torso lengths
-    prior_deg: float = 20.0  # joint rotation away from the stage-B pose costing 1
+    robust: tuple[float, float, float] = (0.5, 0.5, 0.5)  # Geman-McClure scale per stage, in torso lengths
+    prior_deg: float = 90.0  # joint rotation away from the stage-B pose costing 1
     root_prior_deg: float = 60.0
-    smooth: float = 30.0  # second differences of rotations (at 15 fps; scaled to the frame rate)
+    smooth: float = 10.0  # angular acceleration of every joint (at 15 fps; scaled to the frame rate)
     cam_smooth: float = 10.0
     hinge: float = 10.0  # knee/elbow bent the wrong way or off their hinge
     spine: float = 1.0  # unequal bends of Spine, Spine1, Spine2
@@ -380,15 +386,17 @@ def fit_motion(skel: Skeleton, init_rot: np.ndarray, kps: np.ndarray, fps: float
         res = torch.cat([_axis_angle_to_matrix(w_root)[:, None], res[:, 1:]], 1)
         return A @ res
 
-    def losses(rot):
+    def losses(rot, robust):
         _, p = fk_torch(parents, offsets, rot)
         proj = p[:, rig_idx, :2] * torch.tensor([1.0, -1.0], dtype=dt) * torch.exp(log_s)[:, None, None] + tr[:, None]
         r2 = ((proj - xy_n) ** 2).sum(-1)
-        out = {"2d": (w * r2 / (r2 + cfg.robust**2)).sum() / max(T, 1)}
+        out = {"2d": (w * r2 / (r2 + robust**2)).sum() / max(T, 1)}
         out["prior"] = ((w_j[:, 1:] ** 2).sum() / np.radians(cfg.prior_deg) ** 2 + (w_root**2).sum() / np.radians(cfg.root_prior_deg) ** 2) / T
         if T >= 3:
-            d2 = rot[2:] - 2 * rot[1:-1] + rot[:-2]
-            out["smooth"] = cfg.smooth * rate * (d2**2).sum() / T
+            # angular acceleration: change of the frame-to-frame relative rotation (zero for a
+            # steady spin, unlike second differences of the matrices themselves)
+            rel = rot[:-1].transpose(-1, -2) @ rot[1:]
+            out["smooth"] = cfg.smooth * rate * ((rel[1:] - rel[:-1]) ** 2).sum() / T
             cam = torch.cat([log_s[:, None], tr], 1)
             out["cam"] = cfg.cam_smooth * rate * ((cam[2:] - 2 * cam[1:-1] + cam[:-2]) ** 2).sum() / T
         hv = 0.0
@@ -407,11 +415,12 @@ def fit_motion(skel: Skeleton, init_rot: np.ndarray, kps: np.ndarray, fps: float
         return out
 
     report = {}
-    for stage, (n, params) in enumerate(zip(cfg.iters, ([log_s, tr], [log_s, tr, w_root], [log_s, tr, w_root, w_j]))):
+    stages = ([log_s, tr], [log_s, tr, w_root], [log_s, tr, w_root, w_j])
+    for stage, (n, params, robust) in enumerate(zip(cfg.iters, stages, cfg.robust)):
         opt = torch.optim.Adam(params, lr=cfg.lr)
         for _ in range(n):
             opt.zero_grad()
-            ls = losses(pose())
+            ls = losses(pose(), robust)
             total = sum(ls.values())
             total.backward()
             opt.step()

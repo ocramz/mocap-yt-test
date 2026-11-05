@@ -46,6 +46,14 @@ def cmd_setup(args):
     ps = _cfg(args).person_sam
     for repo in (ps.sam, ps.pose):
         print(repo, "->", snapshot_download(repo, allow_patterns=["*.json", "*.safetensors", "*.txt"]))
+    # refine: Depth Anything V2 Small and MotionBERT (only used when enabled under `refine:`)
+    from huggingface_hub import hf_hub_download
+
+    from .depth import DEPTH_REPO, DEPTH_REVISION
+    from .lifting import MB_CKPT, MB_REPO, MB_REVISION
+
+    print(DEPTH_REPO, "->", snapshot_download(DEPTH_REPO, revision=DEPTH_REVISION, allow_patterns=["*.json", "*.safetensors"]))
+    print(MB_REPO, "->", hf_hub_download(MB_REPO, MB_CKPT, revision=MB_REVISION))
 
 
 def cmd_rig(args):
@@ -212,6 +220,8 @@ def cmd_matte(args):
 
 
 def cmd_run(args):
+    import copy
+
     from .features import FeatureExtractor
     from .inference import MocapModel
     from .pipeline import build_rig, publish_sample, run_sample
@@ -221,6 +231,9 @@ def cmd_run(args):
     build_rig(cfg, extractor=ext)
     model = MocapModel()
     for s in _select(cfg, args.ids):
+        if getattr(args, "force_refine", False):
+            s = copy.copy(s)  # (dataclasses.replace would re-validate the already normalised range)
+            s.refine = True
         try:
             res = run_sample(cfg, s, model=model, extractor=ext, preview_every=args.preview_every)
         except Exception as e:  # keep going with the other samples
@@ -283,13 +296,15 @@ def main(argv=None):
     m.add_argument("--every", type=int, help="instead: every N-th frame")
     m.add_argument("-o", "--out", help="PNG to write, plus a .json of per-frame details (default: work/matte/<ids>.png)")
     m.set_defaults(fn=cmd_matte)
-    x = sub.add_parser("run", help="end-to-end: rig, features, inference, export, previews")
-    x.add_argument("ids", nargs="*")
-    x.add_argument("--publish", action="store_true", help="copy results into assets/samples/<id>")
-    x.add_argument("--no-video", action="store_true", help="don't publish preview mp4s")
-    x.add_argument("--preview-every", type=int, default=1)
-    x.add_argument("--strict", action="store_true")
-    x.set_defaults(fn=cmd_run)
+    for name, helptext, force in (("run", "end-to-end: rig, features, inference, [refine,] export, previews", False),
+                                  ("refine", "run with the refine stage on, whatever the config says (caches reused)", True)):
+        x = sub.add_parser(name, help=helptext)
+        x.add_argument("ids", nargs="*")
+        x.add_argument("--publish", action="store_true", help="copy results into assets/samples/<id>")
+        x.add_argument("--no-video", action="store_true", help="don't publish preview mp4s")
+        x.add_argument("--preview-every", type=int, default=1)
+        x.add_argument("--strict", action="store_true")
+        x.set_defaults(fn=cmd_run, force_refine=force)
     args = p.parse_args(argv)
     args.fn(args)
 
