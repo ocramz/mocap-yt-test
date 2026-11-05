@@ -345,7 +345,7 @@ class FeatureExtractor:
 
         cfg = self.person_sam
         n, rots = len(paths), cfg.rotations
-        kps = np.zeros((n, 17, 3), np.float32)
+        kps, views = np.zeros((n, 17, 3), np.float32), np.zeros((n, len(rots), 17, 3), np.float32)
         rotation, rot_scores = np.zeros(n, np.int16), np.zeros((n, len(rots)), np.float32)
         t = time.perf_counter()
         for i, p in enumerate(tqdm(paths, desc="pose") if progress else paths):
@@ -355,21 +355,25 @@ class FeatureExtractor:
             rgb = cv2.cvtColor(cv2.imread(str(p), cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
             allk, means = self.pose_estimator()(rgb, b, rots)
             j = psam.choose_rotation(means, rots, cfg.upright_margin)
-            kps[i], rotation[i], rot_scores[i] = allk[j], rots[j], means
+            kps[i], rotation[i], rot_scores[i], views[i] = allk[j], rots[j], means, allk
         posed = rot_scores.any(1)
         if progress:
             turns = ", ".join(f"{r} deg: {int((rotation[posed] == r).sum())}" for r in rots)
             mean = float(kps[posed, :, 2].mean()) if posed.any() else 0.0
             print(f"[features] pose in {int(posed.sum())}/{n} frames ({(time.perf_counter() - t) / max(n, 1):.2f} s/frame), "
                   f"mean keypoint score {mean:.2f}; kept rotation {turns}")
-        return psam.PersonPoses(np.asarray(boxes, np.float32), kps, rotation, rot_scores)
+        return psam.PersonPoses(np.asarray(boxes, np.float32), kps, rotation, rot_scores, views)
 
     # ------------------------------------------------------------------ features
     @torch.no_grad()
     def dino(self, crops: list[np.ndarray]) -> np.ndarray:
         from PIL import Image
 
-        pils = [Image.fromarray((c * 255).astype(np.uint8)) for c in crops]
+        return self.dino_images([Image.fromarray((c * 255).astype(np.uint8)) for c in crops])
+
+    @torch.no_grad()
+    def dino_images(self, pils) -> np.ndarray:
+        """DINOv2 tokens (N, 257, 1024) of PIL images (e.g. the matted crops as saved)."""
         out = []
         for i in range(0, len(pils), self.batch_size):
             px = self.processor(pils[i : i + self.batch_size], return_tensors="pt").pixel_values

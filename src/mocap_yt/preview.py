@@ -61,10 +61,15 @@ def motion_video_frames(
     size: int = 400,
     every: int = 1,
     crops: list[Path] | None = None,
+    overlay: np.ndarray | None = None,
+    parents=None,
+    names=None,
 ) -> Path:
     """Write per-frame composites: input | model input | mannequin front | mannequin side + skeleton.
 
     ``crops``: the matted crops DINOv2 saw, one per motion frame (the "model input" tile).
+    ``overlay`` (T, J, 2): the capture projected onto the input frames (refine's fitted camera),
+    drawn over the input tile with ``parents``/``names``.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("*.png"):  # a previous, longer run would leak into the preview mp4
@@ -78,7 +83,17 @@ def motion_video_frames(
         tiles = []
         if input_frames:
             im = Image.open(input_frames[min(t, len(input_frames) - 1)]).convert("RGB")
-            tiles.append(label(im.resize((round(im.width * size / im.height), size)), f"input #{t}"))
+            sc = size / im.height
+            im = im.resize((round(im.width * sc), size))
+            if overlay is not None and t < len(overlay):
+                from .render import side_colors
+
+                dr = ImageDraw.Draw(im)
+                cols = side_colors(names)
+                for j in range(1, len(parents)):
+                    a, b = overlay[t, parents[j]] * sc, overlay[t, j] * sc
+                    dr.line([tuple(a), tuple(b)], fill=cols[j], width=3)
+            tiles.append(label(im, f"input #{t}" + (" + fit" if overlay is not None else "")))
         if crops:
             c = crops[min(t, len(crops) - 1)]
             im = Image.open(c).convert("RGB").resize((size, size)) if c.exists() else Image.new("RGB", (size, size), "white")

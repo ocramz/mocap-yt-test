@@ -16,9 +16,10 @@ import numpy as np
 import yaml
 
 from . import upstream, video
-from .bvh import write_bvh
+from .bvh import Motion, write_bvh
 from .mesh import build_mannequin
 from .person_sam import SOURCES, PersonPoses, PersonSamConfig, matting_tag
+from .refine import RefineConfig
 from .rig_assets import RigSpec, build_rig_dataset, calibration_motion, reference_pose
 from .skeleton import mixamo_humanoid
 
@@ -61,12 +62,15 @@ class Sample:
     fps: float = 15.0
     height: int = 720
     subject: str = "salient"
+    refine: bool = False  # fit the capture to the video (mocap_yt.refine); needs subject person/person_sam
     cookies: str | None = None
     note: str = ""
 
     def __post_init__(self):
         if self.subject not in SUBJECTS:
             raise ValueError(f"sample {self.id!r}: subject must be one of {', '.join(SUBJECTS)}, not {self.subject!r}")
+        if self.refine and self.subject == "salient":
+            raise ValueError(f"sample {self.id!r}: refine needs a tracked person (subject person or person_sam)")
         try:
             self.start = video.parse_time(self.start) or 0.0
             self.duration = video.parse_time(self.duration)
@@ -96,12 +100,13 @@ class PipelineConfig:
     samples: list[Sample] = field(default_factory=list)
     work: Path = upstream.WORK_DIR
     person_sam: PersonSamConfig = field(default_factory=PersonSamConfig)  # settings of subject: person_sam
+    refine: RefineConfig = field(default_factory=RefineConfig)  # settings of refine: true
 
     @classmethod
     def load(cls, path: str | Path) -> "PipelineConfig":
         d = yaml.safe_load(Path(path).read_text())
         return cls(rig=RigConfig(**d.get("rig", {})), samples=[Sample(**s) for s in d.get("samples", [])],
-                   person_sam=PersonSamConfig(**(d.get("person_sam") or {})))
+                   person_sam=PersonSamConfig(**(d.get("person_sam") or {})), refine=RefineConfig(**(d.get("refine") or {})))
 
     @property
     def rig_root(self) -> Path:
@@ -173,7 +178,7 @@ def _invalidate(d: Path, params: dict):
     if old == params:
         return
     print(f"[{d.name}] clip parameters changed, rebuilding clip, frames and features")
-    stale = ["clip.mp4", "features.npz", "poses.npz", "frames", "crops", "preview", "out"]
+    stale = ["clip.mp4", "features.npz", "poses.npz", "views.npz", "lift.npz", "depth.npz", "frames", "crops", "preview", "out"]
     if old.get("source") != params["source"]:
         stale.append("download")
     for name in stale:
@@ -264,8 +269,29 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
     feats, ok = sample_features(d, frames, extractor, subject=s.subject, person_sam=cfg.person_sam)
     pred = run_inference(feats, ok, cfg.rig_root, cfg.rig.name, model=model)
     out = d / "out"
-    res = save_prediction(pred, out, cfg.rig_root, fps=s.fps, stem=f"{s.id}_{cfg.rig.name.lower()}")
+    stem = f"{s.id}_{cfg.rig.name.lower()}"
+    res = save_prediction(pred, out, cfg.rig_root, fps=s.fps, stem=stem)
     motion = res.pop("motion")
+    overlay = None
+    if s.refine:
+        from .refine import overlay_points, refine_sample
+
+        if extractor is None:
+            from .features import FeatureExtractor
+
+            extractor = FeatureExtractor(person_sam=cfg.person_sam)
+        poses = person_poses(d, frames, extractor, cfg.person_sam)
+        rig_skel = cfg.rig.skeleton()
+        ref = refine_sample(rig_skel, d, frames, ok, pred, s.fps, cfg.rig_root, cfg.rig.name, cfg.refine, poses,
+                            model=model, extractor=extractor)
+        (out / f"{stem}.bvh").replace(out / f"{stem}_raw.bvh")  # MocapAnything as is, for comparison
+        motion = Motion(motion.skeleton, ref.motion.local_rot, ref.motion.root_pos, s.fps)
+        write_bvh(out / f"{stem}.bvh", motion)
+        overlay = overlay_points(rig_skel, ref.camera_rot, ref.camera)
+        np.savez_compressed(out / f"{stem}_refine.npz", camera=ref.camera.astype(np.float32),
+                            rot_camera=ref.camera_rot.astype(np.float32), overlay=overlay.astype(np.float32),
+                            frame_indices=np.asarray(ok))
+        res["refine"] = ref.report
 
     skel = motion.skeleton
     mesh = build_mannequin(cfg.rig.skeleton())
@@ -273,12 +299,13 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
                       {"mannequin": (mesh, MANNEQUIN_RGBA), "bones": (bone_mesh(skel), BONE_RGBA)}, motion, s.id)
     used = [frames[i] for i in ok]
     crops = [d / "crops" / f.name for f in used] if (d / "crops").is_dir() else None
-    pdir = motion_video_frames(motion, mesh, used, d / "preview", every=preview_every, crops=crops)
+    pdir = motion_video_frames(motion, mesh, used, d / "preview", every=preview_every, crops=crops, overlay=overlay,
+                               parents=cfg.rig.skeleton().parents, names=cfg.rig.skeleton().names)
     mp4 = video.frames_to_video(str(pdir / "*.png"), out / f"{s.id}_preview.mp4", fps=s.fps / preview_every)
     strip = contact_strip(pdir, out / f"{s.id}_preview_strip.png")
     video.contact_sheet(frames, out / f"{s.id}_input_contact_sheet.png")
     res.update(sample=s.id, source=s.source, start=s.start, end=s.end, duration=s.duration, subject=s.subject,
-               glb=glb.name, preview=mp4.name)
+               refine=res.get("refine", False), glb=glb.name, preview=mp4.name)
     if s.subject == "person_sam":
         src = np.load(d / "features.npz")["mask_source"]
         counts = {name: int((src == k).sum()) for k, name in enumerate(SOURCES)}

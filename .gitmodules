@@ -1,3 +1,6 @@
 [submodule "third_party/MocapAnything"]
 	path = third_party/MocapAnything
 	url = https://github.com/phongdaot/MocapAnything
+[submodule "third_party/MotionBERT"]
+	path = third_party/MotionBERT
+	url = https://github.com/Walter0807/MotionBERT

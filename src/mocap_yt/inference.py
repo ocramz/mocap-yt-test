@@ -119,15 +119,46 @@ class MocapModel:
         return pos_acc / w_acc[:, None, None], rot_acc / w_acc[:, None, None]
 
 
-def rot6d_to_motion(rot6d: np.ndarray, template_bvh: Path, fps: float) -> Motion:
-    """Upstream 6D (two matrix rows) -> Motion on the rig's template skeleton."""
+def rot6d_to_matrix(rot6d: np.ndarray) -> np.ndarray:
+    """Upstream 6D (the first two matrix rows) -> rotation matrices (..., 3, 3)."""
     upstream.ensure_on_path()
     from utils.transforms3d import rotation_6d_to_matrix
 
+    return rotation_6d_to_matrix(torch.from_numpy(np.asarray(rot6d)).float()).numpy().astype(np.float64)
+
+
+def rot6d_to_motion(rot6d: np.ndarray, template_bvh: Path, fps: float) -> Motion:
+    """Upstream 6D (two matrix rows) -> Motion on the rig's template skeleton."""
     tpl = read_bvh(template_bvh)
-    mats = rotation_6d_to_matrix(torch.from_numpy(rot6d).float()).numpy().astype(np.float64)
+    mats = rot6d_to_matrix(rot6d)
     root = np.tile(tpl.skeleton.offsets[0], (len(mats), 1))
     return Motion(tpl.skeleton, mats, root, fps)
+
+
+def position_to_metres(position: np.ndarray, rig_root: Path, rig: str) -> np.ndarray:
+    """Normalised predicted joint positions (root-relative) -> metres, as save_prediction does."""
+    gs = json.loads((rig_root / "rigs.json").read_text())[rig]["global_scale"]
+    scale = float(np.load(next((rig_root / "bvh_pose").glob(f"{rig}#*/y0.npz")), allow_pickle=False)["scale"])
+    return np.asarray(position) * gs / scale
+
+
+def predict_views(model: "MocapModel", extractor, crops: list[Path], rig_root: Path, rig: str,
+                  ks=(1, 2, 3)) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """MocapAnything on the matted crops turned by ``np.rot90(crop, k)`` (exact: the crops are
+    square and padded alike on all sides, and are what DINOv2 saw). Returns, per k, the raw
+    prediction (rot6d (T, J, 6), position (T, J, 3) normalised) in the turned view; bring it
+    back with :func:`mocap_yt.geometry.unrotate` in the camera frame."""
+    from PIL import Image
+
+    rigs = json.loads((rig_root / "rigs.json").read_text())
+    seq, pad = rigs[rig]["seq"], len(rigs[rig]["joints"])
+    images = [np.asarray(Image.open(p).convert("RGB")) for p in crops]
+    out = {}
+    for k in ks:
+        feats = extractor.dino_images([Image.fromarray(np.ascontiguousarray(np.rot90(im, k))) for im in images])
+        pos, rot = model.predict(feats, rig_root, rig, seq, pad_joints=pad)
+        out[k] = (rot, pos)
+    return out
 
 
 def ground_motion(m: Motion, smooth: int = 5) -> Motion:

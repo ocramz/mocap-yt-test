@@ -12,19 +12,23 @@ YouTube URL / local file / hf:// ──► clip (start–end, 15 fps, 720p) ─�
            person_sam  same tracker → ViTPose keypoints → SAM 2.1 prompted with them
      ──► DINOv2-large tokens (cached)
      ──► MocapAnything video2pose2rot  (conditioned on the Humanoid rig's reference frame)
-     ──► joint positions + 6D rotations ──► BVH ──► glTF (skinned mannequin + bones)
+     ──► joint positions + 6D rotations
+     ──► [refine: true → fit the capture to the video: cleaned 2D keypoints, MocapAnything on the
+          crops turned by 0/90/180/270°, a flip-free choice per frame, rotations + camera fitted]
+     ──► BVH ──► glTF (skinned mannequin + bones)
                                                 └─► preview mp4 / screenshots
 ```
 
 ## Quick start
 
 ```bash
-git submodule update --init           # third_party/MocapAnything (pinned)
+git submodule update --init           # third_party/MocapAnything and third_party/MotionBERT (pinned)
 uv sync                               # CPU-only torch from download.pytorch.org/whl/cpu
-uv run mocap-yt setup                 # weights: MocapAnything ckpt, RMBG-1.4, DINOv2-large, T5-base, person detector/segmenter, ViTPose, SAM 2.1
+uv run mocap-yt setup                 # weights: MocapAnything ckpt, RMBG-1.4, DINOv2-large, T5-base, person detector/segmenter, ViTPose, SAM 2.1, Depth Anything V2 S, MotionBERT
 uv run mocap-yt rig                   # generate the humanoid + its MocapAnything dataset
 uv run mocap-yt run --publish         # every sample in configs/samples.yaml
 uv run mocap-yt run demo_trap --publish   # ...or selected ids
+uv run mocap-yt refine windmill       # a sample with the refine stage on, whatever its config says
 scripts/gltf_screenshots.sh           # three.js screenshots of the published GLBs
 uv run --group dev pytest             # tests
 ```
@@ -32,7 +36,8 @@ uv run --group dev pytest             # tests
 To add a video, add an entry to [`configs/samples.yaml`](configs/samples.yaml) with an `id`,
 a `source` (a URL, a path relative to the repo root, or `hf://…`), and optionally `start` +
 `end` (or `duration`), `height`, `crop`, `subject` (`salient`, `person` or `person_sam`, see
-[below](#in-the-wild-footage-subject-person)) and `cookies`. Times are seconds or
+[below](#in-the-wild-footage-subject-person)), `refine` (see
+[below](#fitting-the-capture-to-the-video-refine-true)) and `cookies`. Times are seconds or
 `"[[HH:]MM:]SS[.fff]"` strings such as `"3:33.5"`. Every stage writes into `work/` (gitignored)
 and is skipped if its output already exists. Changing a sample's range, `fps`, `height` or `crop`
 rebuilds its clip and features; changing `subject` (or a `person_sam:` setting, for those samples)
@@ -79,9 +84,16 @@ pre-trimmed files: it cuts each sample's `start`–`end` out of the source.
 | `src/mocap_yt/person_sam.py` | pose-prompted SAM matting (`subject: person_sam`): ViTPose with rotation test-time augmentation, prompts from keypoints, SAM 2.1, mask clean-up and checks |
 | `src/mocap_yt/inference.py` | loads the released checkpoint, runs `video2pose2rot`, sliding windows for clips longer than 300 frames, BVH export |
 | `src/mocap_yt/video.py` | yt-dlp download, timestamp parsing, ffmpeg trim/resample, timestamped contact sheets, frame extraction |
+| `src/mocap_yt/refine.py` | the `refine` stage of a sample: evidence, candidates, stages B and C, grounding |
+| `src/mocap_yt/track2d.py` | clean-up of the 2D keypoint track (which rotation-TTA view, which left/right labelling) by dynamic programming |
+| `src/mocap_yt/fitting.py` | stage B (flip-free candidate selection, Viterbi) and stage C (rotations + per-frame camera, torch on CPU); IK from 3D joints |
+| `src/mocap_yt/geometry.py` | MocapAnything's frame vs the camera frame, weak perspective, 2D Procrustes, depth twin / spin / tilt of a pose, rot90 views |
+| `src/mocap_yt/metrics.py` | capture quality without ground truth: flips, turn rates, jitter, floor contact, joint limits, 2D track stability and error |
+| `src/mocap_yt/lifting.py`, `depth.py` | MotionBERT 2D→3D lifting and Depth Anything V2 Small depth-order votes (both opt-in for `refine`) |
 | `src/mocap_yt/pipeline.py`, `cli.py` | config-driven orchestration (`mocap-yt …`), including `mocap-yt matte` to compare matting modes on a few frames |
 | `scripts/gltf_screenshots.sh` | renders published GLBs in three.js (headless Chromium via Playwright); all of them, or the ones given as arguments |
 | `third_party/MocapAnything` | upstream, git submodule pinned at `c99fb22` |
+| `third_party/MotionBERT` | MotionBERT (Apache-2.0), git submodule pinned at `705d3a9`; weights from HF `walterzhu/MotionBERT` |
 | `assets/rigs/humanoid/` | the generated rig: BVH, glTF/GLB, previews, reference render |
 | `assets/samples/<id>/` | per-video results: `.glb`, `.bvh`, preview `.mp4`, screenshots, `prediction.json` |
 
@@ -219,6 +231,107 @@ pose; red: prompt points; orange: prompt box; magenta: SAM mask), then each mode
 
 ![person vs person_sam matting](assets/samples/matting_person_vs_person_sam.png)
 
+## Fitting the capture to the video: `refine: true`
+
+Clean mattes did not fix the breakdance captures. MocapAnything's windmill flipped by 110–160°
+between consecutive frames (8 turns of more than 90° within 1/15 s in 8 s) and its root turned at
+up to 2400°/s, which no body does. Reading upstream's code explains part of it:
+* the model was trained on renders at **30 fps** (we feed 15) from a fixed camera, with no
+  flip, rotation or roll augmentation, so an upside-down body is out of its training data;
+* each output frame sees the image tokens of frames t±2 only;
+* nothing ties its output back to the video: there is no camera and no 2D output.
+
+`refine: true` keeps MocapAnything as the learned pose prior and fits the capture to evidence
+from the video ([`refine.py`](src/mocap_yt/refine.py)):
+
+1. **A clean 2D track.** ViTPose's rotation test-time augmentation keeps, per frame, the best
+   of four views. On a windmill they score almost alike, so the kept view flips head↔feet from
+   frame to frame, and on back views left and right swap. All four views are cached. A
+   dynamic program ([`track2d.py`](src/mocap_yt/track2d.py)) picks per frame one view and a
+   labelling (as is; arms, legs or all swapped), charging for low scores, relabelling and
+   keypoint jumps. On the windmill this takes the 2D torso flips from 9 to 0 and the
+   left/right swaps from 10 to 2.
+2. **Candidates per frame.**
+   * MocapAnything on the matted crops as seen and turned by 90/180/270° (`np.rot90` on the
+     cached crops, exact; the prediction is turned back about the camera axis). An upside-down
+     dancer becomes an upright one for some of these, which is what the model was trained on.
+   * Each view's rotation head, and its position head turned into rotations by bone-direction IK.
+   * Each of those in four variants that monocular video can't tell apart
+     ([`geometry.py`](src/mocap_yt/geometry.py)):
+     * as is;
+     * its **depth twin** (mirrored in depth: projects identically, left/right swapped);
+     * spun 180° about its spine;
+     * tipped over.
+3. **Stage B: a flip-free choice** ([`fitting.py`](src/mocap_yt/fitting.py)). A Viterbi pass picks
+   one candidate per frame.
+   * Frame cost: how well its projection matches the clean keypoints after a 2D similarity, its
+     in-plane turn charged, plus a small price for not being MocapAnything's own answer.
+   * Transition cost: how far the root turns, at a rate that scales with the frame rate, and how
+     much the body-frame pose changes. A steady 20°/frame spin is cheap; a flip is dear.
+4. **Stage C: rotations and a per-frame weak-perspective camera** fitted with torch on the CPU.
+   * Losses: a robust 2D reprojection loss; a prior toward the stage-B pose; the angular
+     acceleration of every joint, which is zero for a steady spin, scaled to the frame rate;
+     knee/elbow hinge limits; a shared spine bend.
+   * The result goes back to MocapAnything's frame and is grounded on the body *surface*:
+     joint heights minus limb radii, never more than 1 cm under the floor. The old grounding
+     on smoothed joint centres let the windmill sink 22 cm and the floor drill 35 cm.
+
+The preview's input tile now shows the fitted skeleton projected onto the frame, and
+`prediction.json` gains a `refine` block: raw vs refined metrics, 2D errors, which candidates
+were picked. MocapAnything's own BVH is kept as `<id>_humanoid_raw.bvh`, and published with
+the rest.
+
+**Cost on 4 vCPUs.** The three turned views cost about 0.56 s/frame (DINOv2 + inference,
+cached in `views.npz`); the four-view poses 0.5 s/frame (cached in `poses.npz`); stage B about
+a second; stage C 10–40 s per clip.
+
+![refine: raw MocapAnything vs refined, projected on the windmill](assets/samples/refine_windmill_overlay.png)
+
+| sample | flips (>90° in 1/15 s) | peak root turn (°/s) | root accel. 95th pct (°/s²) | jitter 95th pct (mm) | 2D error median (px) | floor penetration (cm) |
+|---|---|---|---|---|---|---|
+| `hockey_stance_drill` | 0 → **0** | 44 → **33** | 161 → **130** | 0.5 → **3.4** | 10.6 → **2.5** | 3.4 → **0.1** |
+| `hockey_stop_close` | 0 → **0** | 88 → **59** | 528 → **227** | 3.1 → **4.1** | 11.3 → **4.2** | 5.9 → **0.5** |
+| `hockey_stop` | 0 → **0** | 482 → **142** | 1572 → **576** | 5.5 → **4.5** | 8.9 → **3.7** | 12.0 → **1.0** |
+| `windmill_drill` | 1 → **0** | 1370 → **272** | 4765 → **528** | 2.4 → **3.1** | 21.4 → **5.5** | 34.9 → **1.0** |
+| `windmill` | 8 → **0** | 2409 → **568** | 23659 → **2063** | 6.1 → **4.0** | 32.3 → **19.3** | 22.4 → **1.0** |
+| `windmill_entry` | 3 → **0** | 2406 → **500** | 17109 → **1517** | 7.8 → **5.4** | 28.6 → **11.9** | 20.0 → **1.0** |
+
+* **Raw** is MocapAnything as published before:
+  * its 2D error is measured after the best similarity per frame onto the clean keypoints, i.e.
+    with its own in-plane turn, scale and shift fitted to each frame;
+  * its floor penetration uses the old grounding.
+* **Refined** is `refine: true`.
+* Rates are per second, so the clips compare.
+* Jitter goes *up* by 1–3 mm on the slower clips: fitting each frame to slightly noisy keypoints
+  adds some, where MocapAnything's own temporal model was already smooth.
+
+**What did not help** (measured, and kept opt-in under `refine:` for further work):
+* **MotionBERT** (2D→3D lifting of the clean track, Apache-2.0, `motionbert: true`). Stage B
+  hardly ever picks it. Without the price on non-MocapAnything candidates it is picked on 13 of
+  120 windmill frames, with no better result. It is trained on upright Human3.6M motion and
+  reshapes upside-down poses toward it (its 2D drifts about 20 % of the body size from its
+  input). On the stance drill it put the bent knees behind the hips.
+* **Depth Anything V2 Small** depth-order votes (`depth: true`). On the clear stance drill they
+  are decisive (knees nearer than hips on 14 of 14 frames, as MocapAnything has it). On the
+  blurred 360p windmill, raw, stage B and refined captures all agree with them on only 57–61 %
+  of decided joint pairs, barely above chance. As a referee they can't confirm which depth branch
+  is right there, so they don't steer the fit.
+* **The native frame rate.** Windmill at 29.97 fps (240 frames):
+  * MocapAnything alone is no better: still 8 flips, root turns up to 5076°/s.
+  * Refined, it is smoother than at 15 fps (jitter 95th percentile 1.2 vs 4.0 mm), but its 2D
+    error is a little higher (23.8 vs 19.3 px) for twice the cost, so the clips stay at 15 fps.
+  * Hockey sources are 24 fps, and resampling them to 15 fps takes source steps of 2,1,2,1,2
+    frames: a slight periodic judder, left for later.
+
+**Held-out checks.** These are not circular, because the fit uses the keypoints. On the windmill:
+* *Odd frames held out* (fit on even frames' keypoints): median error 33 px, the same as raw
+  MocapAnything placed on each held-out frame by its own best similarity (33 px).
+* *Wrists and ankles held out*: 54 vs 56 px.
+
+So the fit is no better than MocapAnything where it has no evidence. Its gains are where it has
+evidence: no flips, turn rates a body can do, half the 2D error on observed joints, and feet on
+the floor. Which way a dancer faces when the image can't tell remains MocapAnything's call.
+
 ## Results so far
 
 | sample | source | frames | status |
@@ -244,7 +357,9 @@ picked with `mocap-yt sheet` at 3 s, then 0.5 s, then 0.1 s around each boundary
 continuous shot with the whole body in view, the windmill ones from the camera angle without
 the mirror. All six run at the source's 360p (`height: 360`). Five use `subject: person_sam`.
 The stance drill, which `person` already mattes cleanly, keeps `subject: person`: both modes
-give the same crops there (5.5 cm with `person_sam`).
+give the same crops there (5.5 cm with `person_sam`). All six use `refine: true`
+([above](#fitting-the-capture-to-the-video-refine-true)); each `assets/samples/<id>/` also keeps
+MocapAnything's own capture as `<id>_humanoid_raw.bvh`.
 
 ```bash
 uv run mocap-yt run hockey_stance_drill hockey_stop_close hockey_stop windmill_drill windmill windmill_entry --publish
@@ -253,7 +368,9 @@ uv run mocap-yt gallery hockey_stance_drill hockey_stop_close hockey_stop windmi
 ```
 
 That takes about 40 min on 4 vCPUs (52 min when all six used `subject: person`), nearly all of
-it pose and SAM, or RMBG. Model input next to the capture, 5 frames per clip:
+it pose and SAM, or RMBG, plus about 20 min the first time for the refine stage's turned views
+(re-running `refine` afterwards takes a few minutes). Model input next to the capture,
+5 frames per clip:
 
 ![tutorial gallery](assets/samples/yt_tutorials_gallery.png)
 
@@ -266,13 +383,14 @@ it pose and SAM, or RMBG. Model input next to the capture, 5 frames per clip:
 | `windmill` | 31.0 cm (31.3 person) | Continuous windmills: the upside-down, legs-up V is there, with heavy motion blur at 360p. The matte now holds the whole dancer on every frame. With `person`, frames the segmenter missed lost the blurred limbs or carried a piece of the wall bar or floor. |
 | `windmill_entry` | 24.5 cm (26.7 person) | The standing lunge into the move is captured well, then as `windmill`. |
 
-The FK-vs-pred column is the consistency metric below; "person" and "salient" are the same clip
-run with those subjects. It is no accuracy measure, since there is no ground truth, but it tracks
-how unsure the model is: a stance drill gets better agreement than the demo clips, while
-upside-down floor moves, far from the Mixamo-style motions the model was trained on, get the
-worst. Cleaner crops move it a little on the hockey clips and hardly at all on the floor moves:
-there the model's unfamiliarity with the motion dominates. The model predicts no global
-trajectory, so the captured skaters don't travel across the rink.
+The FK-vs-pred column is the consistency metric below, of MocapAnything's own two outputs
+before refinement; "person" and "salient" are the same clip run with those subjects. It is no
+accuracy measure, since there is no ground truth, but it tracks how unsure the model is: a
+stance drill gets better agreement than the demo clips, while upside-down floor moves, far from
+the Mixamo-style motions the model was trained on, get the worst. Cleaner crops move it a
+little on the hockey clips and hardly at all on the floor moves: there the model's
+unfamiliarity with the motion dominates. The model predicts no global trajectory, so the
+captured skaters don't travel across the rink.
 
 Each `assets/samples/<id>/` holds:
 
@@ -303,7 +421,10 @@ around 8–10 cm on the demo clips. The model's two heads agree only approximate
   about 10 min per 300 frames on 4 vCPUs. The result is cached in `work/samples/<id>/features.npz`.
   `subject: person_sam` replaces RMBG with ViTPose (0.5 s/frame) and SAM 2.1 (1.5 s/frame); its
   poses are cached in `poses.npz` next to it.
+* `refine` doesn't add a global trajectory yet. Its per-frame camera has a scale and a
+  position, which could give one, but that was out of scope here.
 * Model licence: MocapAnything code and weights are MIT. RMBG-1.4 (BRIA AI) has its own,
   non-commercial terms. The person detector/segmenter are torchvision's COCO-trained weights
   (BSD-3 code; COCO annotations are CC BY 4.0). SAM 2.1 (`facebook/sam2.1-hiera-*`) and ViTPose
-  (`usyd-community/vitpose-base-simple`) are Apache-2.0.
+  (`usyd-community/vitpose-base-simple`) are Apache-2.0, as are MotionBERT (code and
+  `walterzhu/MotionBERT` weights) and Depth Anything V2 Small.

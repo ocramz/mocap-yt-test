@@ -129,3 +129,25 @@ def test_configured_local_samples_are_importable():
         path = PROJECT_ROOT / s.source
         assert path.is_file(), s.source
         video.check_range(path, s.start, s.end)
+
+
+def test_refine_settings():
+    with pytest.raises(ValueError, match="refine needs a tracked person"):
+        Sample("r", "x.mp4", refine=True)
+    assert Sample("r", "x.mp4", subject="person", refine=True).refine
+    from mocap_yt.refine import RefineConfig
+
+    assert RefineConfig(views=[0, 2], fit={"robust": [0.5, 0.5, 0.5]}).fit_cfg().robust == (0.5, 0.5, 0.5)
+    with pytest.raises(ValueError, match="include 0"):
+        RefineConfig(views=[1, 2])
+    with pytest.raises(TypeError):
+        RefineConfig(select={"no_such_knob": 1})
+
+
+def test_refine_config_block(tmp_path):
+    y = tmp_path / "c.yaml"
+    y.write_text("refine:\n  views: [0, 2]\n  motionbert: true\n  fit: {smooth: 5}\n"
+                 "samples:\n  - {id: a, source: x.mp4, subject: person_sam, refine: true}\n")
+    cfg = PipelineConfig.load(y)
+    assert cfg.refine.views == (0, 2) and cfg.refine.motionbert and cfg.refine.fit_cfg().smooth == 5
+    assert cfg.samples[0].refine

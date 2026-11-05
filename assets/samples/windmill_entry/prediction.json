@@ -2,10 +2,177 @@
  "rig": "Humanoid",
  "frames": 125,
  "fps": 15.0,
- "inference_seconds": 3.57,
+ "inference_seconds": 3.65,
  "fk_vs_pred_position_err_normalised": 0.2544,
  "fk_vs_pred_position_err_m": 0.2453,
  "bvh": "windmill_entry_humanoid.bvh",
+ "refine": {
+  "track2d": {
+   "raw": {
+    "pairs": 54,
+    "torso_flips": 4,
+    "lr_swaps": 7,
+    "lr_pairs": 47
+   },
+   "clean": {
+    "pairs": 53,
+    "torso_flips": 0,
+    "lr_swaps": 1,
+    "lr_pairs": 45
+   }
+  },
+  "error_2d_px": {
+   "refined": [
+    11.9,
+    54.8
+   ],
+   "raw_best_similarity": [
+    28.6,
+    61.7
+   ]
+  },
+  "sources": [
+   "ma_k0",
+   "ma_k1",
+   "ma_k2",
+   "ma_k3",
+   "ma_pos_k0",
+   "ma_pos_k1",
+   "ma_pos_k2",
+   "ma_pos_k3"
+  ],
+  "picks": {
+   "ma_k0/as_is": 81,
+   "ma_k0/tilt": 6,
+   "ma_k1/as_is": 12,
+   "ma_k3/as_is": 26
+  },
+  "keypoints_read_swapped": 4,
+  "fit": {
+   "stage1": {
+    "2d": 2.9869,
+    "prior": 0.0,
+    "smooth": 0.6987,
+    "cam": 0.0958,
+    "hinge": 0.302,
+    "spine": 0.0116
+   },
+   "stage2": {
+    "2d": 2.6084,
+    "prior": 0.1141,
+    "smooth": 0.5556,
+    "cam": 0.0551,
+    "hinge": 0.302,
+    "spine": 0.0116
+   },
+   "stage3": {
+    "2d": 1.6436,
+    "prior": 0.359,
+    "smooth": 0.2689,
+    "cam": 0.0562,
+    "hinge": 0.0027,
+    "spine": 0.0029
+   }
+  },
+  "metrics_raw": {
+   "frames": 125,
+   "fps": 15.0,
+   "root_speed_deg_s": [
+    226.5,
+    964.0,
+    2406.2
+   ],
+   "root_acc_deg_s2": [
+    1491.5,
+    17109.4,
+    38541.0
+   ],
+   "flips": 3,
+   "blips": 0,
+   "jitter_mm": [
+    0.8,
+    7.8,
+    29.1
+   ],
+   "floor_penetration_cm": 1.0,
+   "frames_below_2cm": 0.0,
+   "hinges": {
+    "LeftLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 6.7
+    },
+    "RightLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 8.5
+    },
+    "LeftForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 16.1
+    },
+    "RightForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 12.2
+    }
+   }
+  },
+  "metrics_refined": {
+   "frames": 125,
+   "fps": 15.0,
+   "root_speed_deg_s": [
+    265.2,
+    469.1,
+    500.3
+   ],
+   "root_acc_deg_s2": [
+    774.6,
+    1516.7,
+    2055.3
+   ],
+   "flips": 0,
+   "blips": 0,
+   "jitter_mm": [
+    1.0,
+    5.4,
+    34.4
+   ],
+   "floor_penetration_cm": 1.0,
+   "frames_below_2cm": 0.0,
+   "hinges": {
+    "LeftLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 6.6
+    },
+    "RightLeg": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 4.8
+    },
+    "LeftForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 13.5
+    },
+    "RightForeArm": {
+     "hyperextended": 0.0,
+     "off_hinge_deg": 12.0
+    }
+   }
+  },
+  "settings": {
+   "refine": {
+    "views": [
+     0,
+     1,
+     2,
+     3
+    ],
+    "position_head": true,
+    "motionbert": false,
+    "depth": false,
+    "select": {},
+    "fit": {}
+   },
+   "version": 1
+  }
+ },
  "sample": "windmill_entry",
  "source": "assets/samples/How to Windmill _ Full Breakdancing Tutorial for Beginners_360p.mp4",
  "start": 326.7,
