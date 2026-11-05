@@ -1,0 +1,18 @@
+{
+ "rig": "Humanoid",
+ "frames": 228,
+ "fps": 15.0,
+ "inference_seconds": 11.31,
+ "fk_vs_pred_position_err_normalised": 0.2449,
+ "fk_vs_pred_position_err_m": 0.2361,
+ "bvh": "windmill_drill_humanoid.bvh",
+ "sample": "windmill_drill",
+ "source": "assets/samples/How to Windmill _ Full Breakdancing Tutorial for Beginners_360p.mp4",
+ "start": 257.0,
+ "end": 272.2,
+ "duration": 15.2,
+ "subject": "person",
+ "glb": "windmill_drill_humanoid.glb",
+ "preview": "windmill_drill_preview.mp4",
+ "note": "windmill drill on the floor (no mirror in shot)"
+}

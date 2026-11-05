@@ -40,15 +40,50 @@ class RigConfig:
 
 @dataclass
 class Sample:
+    """One input clip. ``start``/``end``/``duration`` are seconds or ``[[HH:]MM:]SS[.fff]``
+    strings; give ``end`` or ``duration`` (or neither: to the end of the video).
+
+    ``subject``: ``salient`` (upstream's preprocessing: matte the most salient region; fine
+    on plain backgrounds) or ``person`` (track the main person with a detector and matte
+    only them; for in-the-wild footage). See :mod:`mocap_yt.features`.
+    """
+
     id: str
     source: str
-    start: float = 0.0
-    duration: float | None = None
+    start: float | str = 0.0
+    duration: float | str | None = None
+    end: float | str | None = None
     crop: str | None = None
     fps: float = 15.0
     height: int = 720
+    subject: str = "salient"
     cookies: str | None = None
     note: str = ""
+
+    def __post_init__(self):
+        if self.subject not in ("salient", "person"):
+            raise ValueError(f"sample {self.id!r}: subject must be 'salient' or 'person', not {self.subject!r}")
+        try:
+            self.start = video.parse_time(self.start) or 0.0
+            self.duration = video.parse_time(self.duration)
+            self.end = video.parse_time(self.end)
+        except ValueError as e:
+            raise ValueError(f"sample {self.id!r}: {e}") from None
+        if self.end is not None:
+            if self.duration is not None:
+                raise ValueError(f"sample {self.id!r}: give `end` or `duration`, not both")
+            if self.end <= self.start:
+                raise ValueError(f"sample {self.id!r}: end {self.end} s must be after start {self.start} s")
+            self.duration = round(self.end - self.start, 6)
+        elif self.duration is not None:
+            if self.duration <= 0:
+                raise ValueError(f"sample {self.id!r}: duration must be > 0")
+            self.end = round(self.start + self.duration, 6)
+
+    def clip_params(self) -> dict:
+        """Everything the cached clip/frames/features of this sample depend on."""
+        return {"source": self.source, "start": self.start, "end": self.end, "fps": self.fps,
+                "height": self.height, "crop": self.crop}
 
 
 @dataclass
@@ -123,30 +158,67 @@ def _resolve_source(src: str) -> str:
     return src
 
 
+def _invalidate(d: Path, params: dict):
+    """Drop cached stages of a sample whose clip parameters (range, fps, ...) changed."""
+    stamp = d / "clip.json"
+    if not stamp.exists():
+        return
+    old = json.loads(stamp.read_text())
+    if old == params:
+        return
+    print(f"[{d.name}] clip parameters changed, rebuilding clip, frames and features")
+    stale = ["clip.mp4", "features.npz", "frames", "crops", "preview", "out"]
+    if old.get("source") != params["source"]:
+        stale.append("download")
+    for name in stale:
+        p = d / name
+        if p.is_dir():
+            shutil.rmtree(p)
+        elif p.exists():
+            p.unlink()
+
+
 def prepare_sample(cfg: PipelineConfig, s: Sample) -> tuple[Path, list[Path]]:
     d = cfg.work / "samples" / s.id
+    params = s.clip_params()
+    _invalidate(d, params)
     src = video.fetch(_resolve_source(s.source), d / "download", cookies=s.cookies)
     clip = d / "clip.mp4"
     if not clip.exists():
+        video.check_range(src, s.start, s.end)
         video.make_clip(src, clip, s.start, s.duration, s.fps, s.height, s.crop)
     fdir = d / "frames"
     frames = sorted(fdir.glob("*.png")) if fdir.exists() else []
     if not frames:
         frames = video.extract_frames(clip, fdir)
+    if not frames:
+        raise RuntimeError(f"{s.id}: no frames in {clip} (start={s.start}, end={s.end})")
+    (d / "clip.json").write_text(json.dumps(params, indent=1))
     return d, frames
 
 
-def sample_features(d: Path, frames: list[Path], extractor=None) -> tuple[np.ndarray, list[int]]:
+def sample_features(d: Path, frames: list[Path], extractor=None, subject: str = "salient") -> tuple[np.ndarray, list[int]]:
+    """DINOv2 tokens of every frame, cached in ``features.npz`` with the ``subject`` mode
+    they were computed with (``salient``: upstream's matting; ``person``: person-guided)."""
     cache = d / "features.npz"
     if cache.exists():
         z = np.load(cache, allow_pickle=False)
-        return z["image_embed"].astype(np.float32), z["frame_indices"].tolist()
+        cached = str(z["subject"]) if "subject" in z.files else "salient"
+        if cached == subject:
+            return z["image_embed"].astype(np.float32), z["frame_indices"].tolist()
+        print(f"[{d.name}] subject {cached} -> {subject}: recomputing features")
     if extractor is None:
         from .features import FeatureExtractor
 
         extractor = FeatureExtractor()
-    feats, ok = extractor.encode_images(frames, crops_dir=d / "crops")
-    np.savez_compressed(cache, image_embed=feats.astype(np.float16), frame_indices=np.array(ok))
+    crops = d / "crops"
+    if crops.exists():
+        shutil.rmtree(crops)
+    boxes = extractor.track_people(frames) if subject == "person" else None
+    feats, ok = extractor.encode_images(frames, crops_dir=crops, boxes=boxes)
+    extra = {} if boxes is None else {"person_boxes": boxes.astype(np.float32)}
+    np.savez_compressed(cache, image_embed=feats.astype(np.float16), frame_indices=np.array(ok),
+                        subject=np.array(subject), **extra)
     return feats, ok
 
 
@@ -156,7 +228,7 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
     from .preview import BONE_RGBA, MANNEQUIN_RGBA, contact_strip, motion_video_frames
 
     d, frames = prepare_sample(cfg, s)
-    feats, ok = sample_features(d, frames, extractor)
+    feats, ok = sample_features(d, frames, extractor, subject=s.subject)
     pred = run_inference(feats, ok, cfg.rig_root, cfg.rig.name, model=model)
     out = d / "out"
     res = save_prediction(pred, out, cfg.rig_root, fps=s.fps, stem=f"{s.id}_{cfg.rig.name.lower()}")
@@ -167,11 +239,15 @@ def run_sample(cfg: PipelineConfig, s: Sample, model=None, extractor=None, previ
     glb = export_gltf(out / f"{s.id}_{cfg.rig.name.lower()}.glb", skel,
                       {"mannequin": (mesh, MANNEQUIN_RGBA), "bones": (bone_mesh(skel), BONE_RGBA)}, motion, s.id)
     used = [frames[i] for i in ok]
-    pdir = motion_video_frames(motion, mesh, used, d / "preview", every=preview_every)
+    crops = [d / "crops" / f.name for f in used] if (d / "crops").is_dir() else None
+    pdir = motion_video_frames(motion, mesh, used, d / "preview", every=preview_every, crops=crops)
     mp4 = video.frames_to_video(str(pdir / "*.png"), out / f"{s.id}_preview.mp4", fps=s.fps / preview_every)
     strip = contact_strip(pdir, out / f"{s.id}_preview_strip.png")
     video.contact_sheet(frames, out / f"{s.id}_input_contact_sheet.png")
-    res.update(sample=s.id, source=s.source, start=s.start, duration=s.duration, glb=glb.name, preview=mp4.name)
+    res.update(sample=s.id, source=s.source, start=s.start, end=s.end, duration=s.duration, subject=s.subject,
+               glb=glb.name, preview=mp4.name)
+    if s.note:
+        res["note"] = s.note
     (out / "prediction.json").write_text(json.dumps(res, indent=1))
     return res
 

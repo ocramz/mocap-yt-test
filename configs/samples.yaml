@@ -1,10 +1,13 @@
 # Pipeline definition: `uv run mocap-yt run [ids...] --publish`
 #
 # rig: the generated Mixamo-convention humanoid MocapAnything is conditioned on.
-# samples: input videos. `source` can be a YouTube/yt-dlp URL, a local path, or
-#   hf://<datasets|models>/<org>/<repo>/<path-in-repo>.
-#   start/duration select the segment (seconds); clips are resampled to `fps`
-#   (15, like upstream's human demo clips) and scaled to `height` pixels.
+# samples: input videos. `source` can be a YouTube/yt-dlp URL, a local path
+#   (relative to the repo root), or hf://<datasets|models>/<org>/<repo>/<path-in-repo>.
+#   start + end (or start + duration) select the segment: seconds, or "[[HH:]MM:]SS[.fff]"
+#   strings like "3:33.5" (quote them). `mocap-yt sheet <video>` makes timestamped contact
+#   sheets to find ranges; `mocap-yt trim <video> START-END` cuts a range out.
+#   Clips are resampled to `fps` (15, like upstream's human demo clips) and scaled to
+#   `height` pixels. Changing any of these rebuilds that sample's cached clip and features.
 #   `cookies`: optional Netscape cookies.txt for yt-dlp (YouTube may demand it).
 
 rig:
@@ -26,3 +29,52 @@ samples:
     source: hf://datasets/kehong/MoCapAnythingV2-data-sample/inputs/nbg_human/trap.mp4
   - id: demo_gt
     source: hf://datasets/kehong/MoCapAnythingV2-data-sample/inputs/nbg_human/gt.mp4
+
+  # Local 360p tutorial videos in assets/samples/. Each range is one continuous shot
+  # (no cut, cross-fade, fade or title card inside it) with the whole body in view.
+  # The windmill studio has a wall mirror; these ranges use the camera angle without it.
+  # `subject: person` tracks the dancer/skater with a person detector and mattes only
+  # them: with upstream's salient-object matting (`subject: salient`, the default) the
+  # rink's ceiling rafters are matted instead of a distant skater.
+  - id: hockey_stance_drill
+    source: &hockey "assets/samples/Hockey Stop in 3 Minutes - Learn to Stop on Ice _ Tutorial_360p.mp4"
+    start: "2:41.8"
+    end: "2:47.4"
+    height: 360
+    subject: person
+    note: practicing the hockey-stop hip turn in place, facing the camera
+  - id: hockey_stop_close
+    source: *hockey
+    start: "3:26.6"
+    end: "3:32.2"
+    height: 360
+    subject: person
+    note: skates in from far and stops right in front of a low wide-angle camera
+  - id: hockey_stop
+    source: *hockey
+    start: "3:33.5"
+    end: "3:39.3"
+    height: 360
+    subject: person
+    note: skates in and does a hockey stop with ice spray, whole body in view
+  - id: windmill_drill
+    source: &windmill "assets/samples/How to Windmill _ Full Breakdancing Tutorial for Beginners_360p.mp4"
+    start: "4:17.0"
+    end: "4:32.2"
+    height: 360
+    subject: person
+    note: windmill drill on the floor (no mirror in shot)
+  - id: windmill
+    source: *windmill
+    start: "5:17.6"
+    end: "5:25.6"
+    height: 360
+    subject: person
+    note: continuous windmills, final demonstration
+  - id: windmill_entry
+    source: *windmill
+    start: "5:26.7"
+    end: "5:35.0"
+    height: 360
+    subject: person
+    note: standing, entry, then windmills

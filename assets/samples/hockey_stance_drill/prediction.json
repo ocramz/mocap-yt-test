@@ -1,0 +1,18 @@
+{
+ "rig": "Humanoid",
+ "frames": 84,
+ "fps": 15.0,
+ "inference_seconds": 4.58,
+ "fk_vs_pred_position_err_normalised": 0.0556,
+ "fk_vs_pred_position_err_m": 0.0536,
+ "bvh": "hockey_stance_drill_humanoid.bvh",
+ "sample": "hockey_stance_drill",
+ "source": "assets/samples/Hockey Stop in 3 Minutes - Learn to Stop on Ice _ Tutorial_360p.mp4",
+ "start": 161.8,
+ "end": 167.4,
+ "duration": 5.6,
+ "subject": "person",
+ "glb": "hockey_stance_drill_humanoid.glb",
+ "preview": "hockey_stance_drill_preview.mp4",
+ "note": "practicing the hockey-stop hip turn in place, facing the camera"
+}
